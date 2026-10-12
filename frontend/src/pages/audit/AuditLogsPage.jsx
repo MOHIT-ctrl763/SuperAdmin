@@ -29,6 +29,8 @@ export function AuditLogsPage() {
       }
     } catch (err) {
       toast.error('Failed to load audit logs: ' + err.message);
+      console.log('fail to load');
+      
     } finally {
       setIsLoading(false);
     }
