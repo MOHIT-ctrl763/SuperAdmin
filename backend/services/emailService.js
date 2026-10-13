@@ -12,6 +12,7 @@ function getTransporter() {
       transporter = nodemailer.createTransport({
         service: 'gmail',
         auth: { user, pass }
+
       });
     } else {
       const port = parseInt(process.env.SMTP_PORT, 10) || 465;
