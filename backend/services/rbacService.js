@@ -164,6 +164,42 @@ const DEFAULT_ROLES_CONFIG = [
       'notifications.view', 'notifications.create', 'notifications.send',
       'auditLogs.view', 'auditLogs.export'
     ]
+  },
+  {
+    name: 'Company Admin',
+    slug: 'company_admin',
+    description: 'Autonomous administration of tenant company CRM resources, staff users, branches, and customer pipeline.',
+    is_system: true,
+    permissions: [
+      'dashboard.view',
+      'organizations.view', 'organizations.update',
+      'users.view', 'users.create', 'users.update', 'users.suspend',
+      'subscriptions.view',
+      'invoices.view', 'invoices.download',
+      'payments.view',
+      'usage.view',
+      'notifications.view',
+      'support.view', 'support.create', 'support.update',
+      'settings.view'
+    ]
+  },
+  {
+    name: 'Organization Admin',
+    slug: 'org_admin',
+    description: 'Tenant organization administrator with isolated access to company data and team.',
+    is_system: true,
+    permissions: [
+      'dashboard.view',
+      'organizations.view', 'organizations.update',
+      'users.view', 'users.create', 'users.update', 'users.suspend',
+      'subscriptions.view',
+      'invoices.view', 'invoices.download',
+      'payments.view',
+      'usage.view',
+      'notifications.view',
+      'support.view', 'support.create', 'support.update',
+      'settings.view'
+    ]
   }
 ];
 

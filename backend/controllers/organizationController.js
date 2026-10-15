@@ -20,6 +20,15 @@ exports.getOrganizations = async (req, res) => {
       pIdx++;
     }
 
+    // Tenant Isolation: Non-SuperAdmin only sees their own organization
+    if (!req.user?.isSuperAdmin) {
+      const orgId = req.user?.organization_id || 0;
+      sql += ` AND id = $${pIdx}`;
+      countSql += ` AND id = $${pIdx}`;
+      params.push(orgId);
+      pIdx++;
+    }
+
     if (search) {
       sql += ` AND (name ILIKE $${pIdx} OR slug ILIKE $${pIdx} OR email ILIKE $${pIdx} OR owner_name ILIKE $${pIdx})`;
       countSql += ` AND (name ILIKE $${pIdx} OR slug ILIKE $${pIdx} OR email ILIKE $${pIdx} OR owner_name ILIKE $${pIdx})`;
@@ -52,6 +61,10 @@ exports.getOrganizations = async (req, res) => {
 
 exports.getOrganizationById = async (req, res) => {
   try {
+    if (!req.user?.isSuperAdmin && String(req.user?.organization_id) !== String(req.params.id)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: You cannot view other organizations.' });
+    }
+
     const orgRes = await query('SELECT * FROM organizations WHERE id = $1', [req.params.id]);
     if (orgRes.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Organization not found' });
@@ -182,6 +195,12 @@ exports.createOrganization = async (req, res) => {
     }
 
     const orgEmail = (email || ownerEmail).toLowerCase().trim();
+    if (phone) {
+      const numericPhone = String(phone).replace(/\D/g, '');
+      if (numericPhone.length !== 10) {
+        return res.status(400).json({ success: false, message: 'Contact phone number must be exactly 10 digits without letters or special characters.' });
+      }
+    }
     const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(0, 10) : '';
     const generatedSlug = slug || name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-');
     const planRes = await query('SELECT * FROM saas_plans WHERE id = $1', [planId || 2]);
@@ -199,15 +218,44 @@ exports.createOrganization = async (req, res) => {
     // Create or link Owner Admin user account
     const ownerCleanEmail = (ownerEmail || orgEmail).toLowerCase().trim();
     const existingUser = await query('SELECT id FROM users WHERE email = $1', [ownerCleanEmail]);
+    let userId;
     if (existingUser.rows.length === 0) {
-      const ownerPass = req.body.ownerPassword || '123456';
+      const ownerPass = req.body.ownerPassword || 'Company@123';
       const hash = bcrypt.hashSync(ownerPass, 10);
-      await query(`
+      const userRes = await query(`
         INSERT INTO users (name, email, password, phone, role_name, role_display_name, is_active, organization_id, organization_name)
         VALUES ($1, $2, $3, $4, 'ORG_ADMIN', 'Organization Admin', true, $5, $6)
+        RETURNING id
       `, [ownerName || 'Admin', ownerCleanEmail, hash, cleanPhone, newOrg.id, name]);
+      userId = userRes.rows[0].id;
     } else {
-      await query('UPDATE users SET organization_id = $1, organization_name = $2 WHERE id = $3', [newOrg.id, name, existingUser.rows[0].id]);
+      userId = existingUser.rows[0].id;
+      await query('UPDATE users SET organization_id = $1, organization_name = $2 WHERE id = $3', [newOrg.id, name, userId]);
+    }
+
+    // Ensure org_admin / company_admin role in user_roles
+    const roleLookup = await query("SELECT id FROM roles WHERE slug IN ('org_admin', 'company_admin') LIMIT 1");
+    if (roleLookup.rows.length > 0) {
+      await query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [userId, roleLookup.rows[0].id]);
+    }
+
+    // Auto-sync into crm_companies ledger so CRM immediately recognizes this organization
+    try {
+      const crmCheck = await query('SELECT id FROM crm_companies WHERE email = $1 OR name = $2', [orgEmail, name]);
+      let crmCompId;
+      if (crmCheck.rows.length === 0) {
+        const insComp = await query(`
+          INSERT INTO crm_companies (name, email, phone, address, state, status, source)
+          VALUES ($1, $2, $3, $4, $5, 'ACTIVE', 'Organization Provisioned')
+          RETURNING id
+        `, [name, orgEmail, cleanPhone, city || '', state || 'Maharashtra']);
+        crmCompId = insComp.rows[0].id;
+      } else {
+        crmCompId = crmCheck.rows[0].id;
+      }
+      await query('UPDATE users SET crm_company_id = $1 WHERE id = $2', [String(crmCompId), userId]);
+    } catch (crmSyncErr) {
+      console.warn('Auto CRM sync for organization skipped:', crmSyncErr.message);
     }
 
     const subAmount = parseFloat(plan?.price_monthly) || (plan?.price_yearly ? parseFloat(plan.price_yearly) / 12 : 79);

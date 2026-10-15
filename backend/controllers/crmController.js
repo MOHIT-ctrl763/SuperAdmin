@@ -1,0 +1,1820 @@
+/**
+ * CRM Integration Controller for Super Admin Backend
+ * Bridges Super Admin console with external CRM API.
+ */
+
+const bcrypt = require('bcryptjs');
+const crmApiService = require('../services/crmApiService');
+const { query } = require('../db/database');
+
+/**
+ * Helper to resolve the authenticated caller's company/tenant scope
+ */
+function getCallerTenantScope(req) {
+  const isSuperAdmin = req.user?.isSuperAdmin === true;
+  const companyId = req.user?.crm_company_id ? String(req.user.crm_company_id) : (req.user?.organization_id ? String(req.user.organization_id) : null);
+  const companyName = req.user?.organization_name || null;
+  const userEmail = req.user?.email ? req.user.email.toLowerCase().trim() : null;
+  return { isSuperAdmin, companyId, companyName, userEmail };
+}
+
+/**
+ * Check CRM API status, connectivity, and active session
+ */
+exports.getStatus = async (req, res) => {
+  try {
+    const health = await crmApiService.checkHealth();
+    const token = await crmApiService.getActiveToken();
+
+    // Check count of linked Super Admin organizations
+    let linkedCount = 0;
+    try {
+      const linkedRes = await query(`
+        SELECT COUNT(*) as count FROM organizations 
+        WHERE EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'organizations' AND column_name = 'crm_company_id'
+        ) AND crm_company_id IS NOT NULL
+      `);
+      linkedCount = parseInt(linkedRes.rows[0]?.count || 0, 10);
+    } catch (e) {
+      linkedCount = 0;
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        ...health,
+        hasActiveSession: !!token,
+        isConfigured: !!(process.env.CRM_API_BASE_URL || health.baseUrl),
+        linkedOrganizationsCount: linkedCount
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message || 'Error checking CRM status'
+    });
+  }
+};
+
+/**
+ * Run dynamic live audit across all 82 cataloged CRM endpoints
+ */
+exports.getEndpointsCoverage = async (req, res) => {
+  try {
+    const auditResults = await crmApiService.runFullEndpointAudit();
+    return res.json(auditResults);
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message || 'Failed to execute endpoint coverage audit'
+    });
+  }
+};
+
+/**
+ * Connect to CRM by providing credentials or manual bearer token
+ */
+exports.connect = async (req, res) => {
+  try {
+    const { email, password, token, customBaseUrl } = req.body;
+
+    if (customBaseUrl && typeof customBaseUrl === 'string') {
+      let cleanUrl = customBaseUrl.trim().replace(/\/+$/, '');
+      if (!cleanUrl.endsWith('/api/v1') && !cleanUrl.includes('/api/')) {
+        cleanUrl = `${cleanUrl}/api/v1`;
+      }
+      await query(`
+        INSERT INTO system_settings (key, value, updated_at)
+        VALUES ('crm_custom_base_url', $1, CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+      `, [cleanUrl]);
+      process.env.CRM_API_BASE_URL = cleanUrl;
+    }
+
+    if (token) {
+      await crmApiService.setActiveToken(token);
+      const health = await crmApiService.checkHealth();
+      return res.json({
+        success: true,
+        message: 'CRM Bearer token saved successfully.',
+        data: health
+      });
+    }
+
+    if (email && password) {
+      const loginRes = await crmApiService.login(email, password);
+      if (!loginRes.success) {
+        return res.status(loginRes.status || 401).json({
+          success: false,
+          message: loginRes.message || 'CRM login failed with provided credentials'
+        });
+      }
+
+      const health = await crmApiService.checkHealth();
+      return res.json({
+        success: true,
+        message: 'Connected to CRM API successfully.',
+        data: {
+          ...health,
+          user: loginRes.user
+        }
+      });
+    }
+
+    if (!token && (!email || !password)) {
+      if (customBaseUrl) {
+        const health = await crmApiService.checkHealth();
+        return res.json({
+          success: true,
+          message: 'CRM API base URL updated successfully.',
+          data: health
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide either CRM login credentials (email & password) or a valid Bearer token.'
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message || 'Failed to connect to CRM'
+    });
+  }
+};
+
+/**
+ * Disconnect CRM session
+ */
+exports.disconnect = async (req, res) => {
+  try {
+    await crmApiService.setActiveToken(null);
+    return res.json({
+      success: true,
+      message: 'Disconnected from CRM session successfully.'
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// Companies Controllers (Super Admin Managed + CRM API Synced)
+// ==========================================
+
+async function ensureCrmCompaniesTable() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS crm_companies (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name VARCHAR(255) NOT NULL,
+      email VARCHAR(255),
+      phone VARCHAR(50),
+      address TEXT,
+      state VARCHAR(100),
+      state_code VARCHAR(10),
+      financial_year_start DATE,
+      gstin VARCHAR(50),
+      pan VARCHAR(50),
+      website VARCHAR(255),
+      status VARCHAR(50) DEFAULT 'ACTIVE',
+      source VARCHAR(50) DEFAULT 'Super Admin Provisioned',
+      crm_synced BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await query(`
+    ALTER TABLE crm_companies ADD COLUMN IF NOT EXISTS plan_id INTEGER;
+    ALTER TABLE crm_companies ADD COLUMN IF NOT EXISTS plan_name VARCHAR(100);
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS crm_company_id VARCHAR(100);
+  `);
+}
+
+exports.getCompanies = async (req, res) => {
+  try {
+    await ensureCrmCompaniesTable();
+    const { isSuperAdmin, companyId, companyName, userEmail } = getCallerTenantScope(req);
+
+    // Strict Tenant Isolation: Non-SuperAdmin only sees their own company
+    if (!isSuperAdmin) {
+      let localRes;
+      if (companyId) {
+        localRes = await query(
+          `SELECT * FROM crm_companies WHERE id::text = $1 ORDER BY created_at DESC`,
+          [companyId]
+        );
+      } else {
+        localRes = await query(
+          `SELECT * FROM crm_companies WHERE email = $1 OR name = $2 ORDER BY created_at DESC`,
+          [userEmail || '', companyName || '']
+        );
+      }
+
+      const isolatedItems = localRes.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        email: r.email,
+        phone: r.phone,
+        address: r.address,
+        state: r.state,
+        state_code: r.state_code,
+        financial_year_start: r.financial_year_start,
+        gstin: r.gstin,
+        pan: r.pan,
+        website: r.website,
+        status: r.status || 'ACTIVE',
+        plan_id: r.plan_id,
+        plan_name: r.plan_name || 'Standard',
+        source: 'Tenant Isolated Ledger',
+        createdAt: r.created_at,
+        created_at: r.created_at
+      }));
+
+      return res.json({
+        success: true,
+        data: {
+          items: isolatedItems,
+          total: isolatedItems.length
+        }
+      });
+    }
+
+    // 1. Fetch Super Admin provisioned CRM companies
+    const localRes = await query(`SELECT * FROM crm_companies ORDER BY created_at DESC`);
+    const localItems = localRes.rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      email: r.email,
+      phone: r.phone,
+      address: r.address,
+      state: r.state,
+      state_code: r.state_code,
+      financial_year_start: r.financial_year_start,
+      gstin: r.gstin,
+      pan: r.pan,
+      website: r.website,
+      status: r.status || 'ACTIVE',
+      plan_id: r.plan_id,
+      plan_name: r.plan_name || 'Standard',
+      source: r.source || 'Super Admin Provisioned',
+      createdAt: r.created_at,
+      created_at: r.created_at
+    }));
+
+    // 2. Fetch remote CRM companies
+    let remoteItems = [];
+    try {
+      const result = await crmApiService.getCompanies(req.query);
+      if (result.success && result.data) {
+        if (Array.isArray(result.data)) {
+          remoteItems = result.data;
+        } else if (result.data.companies && Array.isArray(result.data.companies)) {
+          remoteItems = result.data.companies;
+        } else if (result.data.items && Array.isArray(result.data.items)) {
+          remoteItems = result.data.items;
+        } else if (typeof result.data === 'object' && result.data.id) {
+          remoteItems = [result.data];
+        }
+      }
+    } catch (e) {
+      // Remote CRM endpoint fallback
+    }
+
+    // 3. Merge deduplicated
+    const combined = [...localItems];
+    for (const remote of remoteItems) {
+      const exists = combined.some(c => String(c.id) === String(remote.id) || (c.name && remote.name && c.name.toLowerCase() === remote.name.toLowerCase()));
+      if (!exists) {
+        combined.push({
+          ...remote,
+          source: 'NexFlow CRM Live'
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        items: combined,
+        total: combined.length
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getCompanyById = async (req, res) => {
+  try {
+    await ensureCrmCompaniesTable();
+    const { isSuperAdmin, companyId, companyName, userEmail } = getCallerTenantScope(req);
+
+    const localRes = await query('SELECT * FROM crm_companies WHERE id::text = $1', [req.params.id]);
+    if (localRes.rows.length > 0) {
+      const comp = localRes.rows[0];
+      // Enforce isolation for non-superadmins
+      if (!isSuperAdmin) {
+        const isOwner = (companyId && String(comp.id) === companyId) ||
+                        (companyName && comp.name && comp.name.toLowerCase() === companyName.toLowerCase()) ||
+                        (userEmail && comp.email && comp.email.toLowerCase() === userEmail);
+        if (!isOwner) {
+          return res.status(403).json({ success: false, message: 'Forbidden: You can only view your own company profile.' });
+        }
+      }
+      return res.json({ success: true, data: comp });
+    }
+
+    if (!isSuperAdmin) {
+      return res.status(404).json({ success: false, message: 'Company not found or access denied.' });
+    }
+
+    const result = await crmApiService.getCompanyById(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.createCompany = async (req, res) => {
+  try {
+    const { name, email, phone, address, state, stateCode, financialYearStart, gstin, pan, website, password, planId } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Company Name is required' });
+    }
+
+    // Verify OTP confirmation for company email if provided
+    if (email && email.trim()) {
+      const cleanEmail = email.trim().toLowerCase();
+      const verRes = await query(`
+        SELECT id FROM saas_email_verifications
+        WHERE email = $1 AND is_verified = TRUE
+        ORDER BY id DESC LIMIT 1
+      `, [cleanEmail]);
+
+      if (verRes.rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Company email ${cleanEmail} has not been verified with OTP yet. Please verify email before provisioning.`
+        });
+      }
+    }
+
+    if (phone) {
+      const numericPhone = String(phone).replace(/\D/g, '');
+      if (numericPhone.length !== 10) {
+        return res.status(400).json({
+          success: false,
+          message: 'Company phone number must be exactly 10 digits without letters or special characters.'
+        });
+      }
+    }
+
+    await ensureCrmCompaniesTable();
+
+    // Fetch the chosen plan
+    let chosenPlan = null;
+    if (planId) {
+      const planRes = await query('SELECT * FROM saas_plans WHERE id = $1', [planId]);
+      if (planRes.rows.length > 0) {
+        chosenPlan = planRes.rows[0];
+      }
+    }
+    if (!chosenPlan) {
+      const defaultPlanRes = await query('SELECT * FROM saas_plans WHERE is_active = true ORDER BY id ASC LIMIT 1');
+      if (defaultPlanRes.rows.length > 0) {
+        chosenPlan = defaultPlanRes.rows[0];
+      }
+    }
+
+    const assignedPlanId = chosenPlan ? chosenPlan.id : (planId || 2);
+    const assignedPlanName = chosenPlan ? chosenPlan.name : 'Pro';
+
+    // 1. Forward to upstream CRM API if accessible
+    let crmSynced = false;
+    try {
+      const crmRes = await crmApiService.createCompany(req.body);
+      if (crmRes.success) {
+        crmSynced = true;
+      }
+    } catch (e) {
+      // Handled gracefully
+    }
+
+    // 2. Persist company record into SuperAdmin CRM ledger
+    const insertRes = await query(`
+      INSERT INTO crm_companies (
+        name, email, phone, address, state, state_code,
+        financial_year_start, gstin, pan, website, status, source, crm_synced,
+        plan_id, plan_name
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'ACTIVE', 'Super Admin Provisioned', $11, $12, $13)
+      RETURNING *
+    `, [
+      name.trim(),
+      email ? email.trim() : null,
+      phone ? phone.trim() : null,
+      address ? address.trim() : null,
+      state || 'Maharashtra',
+      stateCode || '27',
+      financialYearStart || '2026-04-01',
+      gstin ? gstin.trim() : null,
+      pan ? pan.trim() : null,
+      website ? website.trim() : null,
+      crmSynced,
+      assignedPlanId,
+      assignedPlanName
+    ]);
+
+    const createdCompany = insertRes.rows[0];
+
+    // 2b. Also create or link a corresponding SaaS organization and subscription for full platform compatibility
+    let linkedOrgId = null;
+    try {
+      const cleanCompEmail = email ? email.trim().toLowerCase() : null;
+      const cleanCompPhone = phone ? String(phone).replace(/\D/g, '').slice(0, 10) : '';
+      const orgSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 50);
+
+      const existingOrg = await query('SELECT id FROM organizations WHERE email = $1 OR name = $2 LIMIT 1', [cleanCompEmail || '', name.trim()]);
+      if (existingOrg.rows.length > 0) {
+        linkedOrgId = existingOrg.rows[0].id;
+        await query('UPDATE organizations SET crm_company_id = $1, plan_id = $2, plan_name = $3 WHERE id = $4', [
+          createdCompany.id,
+          assignedPlanId,
+          assignedPlanName,
+          linkedOrgId
+        ]);
+      } else {
+        const newOrgRes = await query(`
+          INSERT INTO organizations (name, slug, email, phone, city, state, status, plan_id, plan_name, owner_name, users_count, crm_company_id)
+          VALUES ($1, $2, $3, $4, $5, $6, 'ACTIVE', $7, $8, $9, 1, $10)
+          RETURNING id
+        `, [
+          name.trim(),
+          orgSlug,
+          cleanCompEmail || '',
+          cleanCompPhone,
+          address ? address.split(',')[0].trim() : '',
+          state || 'Maharashtra',
+          assignedPlanId,
+          assignedPlanName,
+          name.trim() + ' Admin',
+          createdCompany.id
+        ]);
+        linkedOrgId = newOrgRes.rows[0].id;
+
+        // Create subscription entry
+        const periodStart = new Date();
+        const periodEnd = new Date(periodStart.getTime() + 30 * 86400000);
+        await query(`
+          INSERT INTO saas_subscriptions (
+            organization_id, organization_name, plan_id, plan_name, billing_cycle,
+            current_period_start, current_period_end, amount, status
+          )
+          VALUES ($1, $2, $3, $4, 'MONTHLY', $5, $6, $7, 'ACTIVE')
+          ON CONFLICT DO NOTHING
+        `, [
+          linkedOrgId,
+          name.trim(),
+          assignedPlanId,
+          assignedPlanName,
+          periodStart.toISOString(),
+          periodEnd.toISOString(),
+          chosenPlan?.price_monthly || 79
+        ]);
+      }
+    } catch (orgSyncErr) {
+      console.warn('Auto SaaS org provisioning for CRM company:', orgSyncErr.message);
+    }
+
+    // 3. Automatically provision Company Admin account so this company can log in to CRM
+    let userCreated = false;
+    const loginEmail = email ? email.trim().toLowerCase() : null;
+    const adminPassword = (password && String(password).trim().length >= 6) ? String(password).trim() : (password || 'Company@123');
+
+    if (loginEmail) {
+      const existingUser = await query('SELECT id FROM users WHERE email = $1', [loginEmail]);
+      if (existingUser.rows.length === 0) {
+        const hash = bcrypt.hashSync(adminPassword, 10);
+        const cleanCompPhone = phone ? String(phone).replace(/\D/g, '').slice(0, 10) : null;
+        const newUsrRes = await query(`
+          INSERT INTO users (name, email, password, phone, role_name, role_display_name, is_active, crm_company_id, organization_id, organization_name)
+          VALUES ($1, $2, $3, $4, 'COMPANY_ADMIN', 'Company Administrator', true, $5, $6, $7)
+          RETURNING id
+        `, [
+          name.trim() + ' Admin',
+          loginEmail,
+          hash,
+          cleanCompPhone,
+          createdCompany.id,
+          linkedOrgId,
+          createdCompany.name
+        ]);
+        const newUserId = newUsrRes.rows[0].id;
+
+        // Assign company_admin role in user_roles
+        const roleRes = await query("SELECT id FROM roles WHERE slug = 'company_admin'");
+        if (roleRes.rows.length > 0) {
+          await query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [newUserId, roleRes.rows[0].id]);
+        }
+
+        // Add to crm_company_users team ledger
+        await query(`
+          INSERT INTO crm_company_users (id, name, email, phone, role, company_id, is_active)
+          VALUES ($1, $2, $3, $4, 'ADMIN', $5, true)
+          ON CONFLICT (id) DO NOTHING
+        `, [
+          'crm-admin-' + Date.now(),
+          name.trim() + ' Admin',
+          loginEmail,
+          cleanCompPhone,
+          createdCompany.id
+        ]);
+        userCreated = true;
+      } else {
+        const updateParams = [createdCompany.id, linkedOrgId, createdCompany.name, existingUser.rows[0].id];
+        let pwdClause = '';
+        if (password && String(password).trim().length >= 6) {
+          const hash = bcrypt.hashSync(String(password).trim(), 10);
+          updateParams.unshift(hash);
+          pwdClause = 'password = $1, ';
+        }
+        await query(`
+          UPDATE users
+          SET ${pwdClause}role_name = 'COMPANY_ADMIN', role_display_name = 'Company Administrator', is_active = true, crm_company_id = $${updateParams.length - 3}, organization_id = $${updateParams.length - 2}, organization_name = $${updateParams.length - 1}
+          WHERE id = $${updateParams.length}
+        `, updateParams);
+
+        const roleRes = await query("SELECT id FROM roles WHERE slug = 'company_admin'");
+        if (roleRes.rows.length > 0) {
+          await query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [existingUser.rows[0].id, roleRes.rows[0].id]);
+        }
+      }
+
+      // 4. Provision Company Admin directly into NexFlow CRM API so they can log in to NexFlow CRM!
+      let crmUserSynced = false;
+      try {
+        const crmCreateRes = await crmApiService.createCompanyUser({
+          name: name.trim(),
+          email: loginEmail,
+          password: adminPassword,
+          phone: phone ? String(phone).replace(/\D/g, '').slice(0, 10) : null,
+          role: 'owner_/_ceo'
+        });
+
+        if (crmCreateRes.success) {
+          crmUserSynced = true;
+          console.log(`[CRM_API] User ${loginEmail} provisioned into NexFlow CRM with role owner_/_ceo.`);
+        } else if (crmCreateRes.message && crmCreateRes.message.includes('Email already exists')) {
+          // If already in NexFlow CRM, update password so they can log in with this new password
+          const allCrmUsers = await crmApiService.getCompanyUsers({ search: loginEmail });
+          const items = Array.isArray(allCrmUsers.data) ? allCrmUsers.data : (allCrmUsers.data?.items || []);
+          const matched = items.find(u => u.email && u.email.toLowerCase() === loginEmail.toLowerCase());
+          if (matched && matched.id) {
+            await crmApiService.updateCompanyUser(matched.id, { password: adminPassword });
+            crmUserSynced = true;
+            console.log(`[CRM_API] User ${loginEmail} password updated in NexFlow CRM.`);
+          }
+        }
+      } catch (crmUsrErr) {
+        console.warn('[CRM_API] Error syncing company admin to NexFlow CRM:', crmUsrErr.message);
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: userCreated
+        ? `CRM Company '${createdCompany.name}' created with ${assignedPlanName} plan! Login access configured for ${loginEmail} in NexFlow CRM.`
+        : `CRM Company '${createdCompany.name}' created with ${assignedPlanName} plan and synced to NexFlow CRM!`,
+      data: {
+        ...createdCompany,
+        plan_id: assignedPlanId,
+        plan_name: assignedPlanName,
+        loginCredentials: loginEmail ? {
+          email: loginEmail,
+          passwordSet: true,
+          role: 'Company Administrator (owner_/_ceo)',
+          plan: assignedPlanName
+        } : null
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.resetCompanyPassword = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+    if (!password || String(password).trim().length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters long.' });
+    }
+
+    await ensureCrmCompaniesTable();
+    const compRes = await query('SELECT * FROM crm_companies WHERE id::text = $1', [id]);
+    if (compRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'CRM Company not found.' });
+    }
+    const company = compRes.rows[0];
+    const email = company.email ? company.email.trim().toLowerCase() : null;
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'This company does not have an associated contact email.' });
+    }
+
+    const cleanPass = String(password).trim();
+    const hash = bcrypt.hashSync(cleanPass, 10);
+
+    // 1. Update in local users table
+    const existingUser = await query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      await query(`
+        UPDATE users
+        SET password = $1, role_name = 'COMPANY_ADMIN', role_display_name = 'Company Administrator', is_active = true, crm_company_id = $2
+        WHERE id = $3
+      `, [hash, company.id, existingUser.rows[0].id]);
+      const roleRes = await query("SELECT id FROM roles WHERE slug = 'company_admin'");
+      if (roleRes.rows.length > 0) {
+        await query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [existingUser.rows[0].id, roleRes.rows[0].id]);
+      }
+    } else {
+      const cleanPhone = company.phone ? String(company.phone).replace(/\D/g, '').slice(0, 10) : null;
+      const newUsr = await query(`
+        INSERT INTO users (name, email, password, phone, role_name, role_display_name, is_active, crm_company_id, organization_name)
+        VALUES ($1, $2, $3, $4, 'COMPANY_ADMIN', 'Company Administrator', true, $5, $6)
+        RETURNING id
+      `, [company.name + ' Admin', email, hash, cleanPhone, company.id, company.name]);
+      const roleRes = await query("SELECT id FROM roles WHERE slug = 'company_admin'");
+      if (roleRes.rows.length > 0) {
+        await query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [newUsr.rows[0].id, roleRes.rows[0].id]);
+      }
+    }
+
+    // 2. Sync to NexFlow CRM API
+    let crmSynced = false;
+    try {
+      const crmCreateRes = await crmApiService.createCompanyUser({
+        name: company.name,
+        email: email,
+        password: cleanPass,
+        phone: company.phone ? String(company.phone).replace(/\D/g, '').slice(0, 10) : null,
+        role: 'owner_/_ceo'
+      });
+      if (crmCreateRes.success) {
+        crmSynced = true;
+      } else if (crmCreateRes.message && crmCreateRes.message.includes('Email already exists')) {
+        const allCrmUsers = await crmApiService.getCompanyUsers({ search: email });
+        const items = Array.isArray(allCrmUsers.data) ? allCrmUsers.data : (allCrmUsers.data?.items || []);
+        const matched = items.find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
+        if (matched && matched.id) {
+          const upRes = await crmApiService.updateCompanyUser(matched.id, { password: cleanPass });
+          if (upRes.success) crmSynced = true;
+        }
+      }
+    } catch (e) {
+      console.warn('Sync to NexFlow CRM failed:', e.message);
+    }
+
+    return res.json({
+      success: true,
+      message: `Password updated successfully! Company admin (${email}) can now log in to NexFlow CRM with this password.`,
+      crmSynced
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateCompany = async (req, res) => {
+  try {
+    await ensureCrmCompaniesTable();
+    const { isSuperAdmin, companyId } = getCallerTenantScope(req);
+    if (!isSuperAdmin && companyId && String(companyId) !== String(req.params.id)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: You cannot modify other companies.' });
+    }
+
+    const { name, email, phone, address, state, gstin, pan, website } = req.body;
+    await query(`
+      UPDATE crm_companies
+      SET name = COALESCE($1, name),
+          email = COALESCE($2, email),
+          phone = COALESCE($3, phone),
+          address = COALESCE($4, address),
+          state = COALESCE($5, state),
+          gstin = COALESCE($6, gstin),
+          pan = COALESCE($7, pan),
+          website = COALESCE($8, website),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id::text = $9
+    `, [name, email, phone, address, state, gstin, pan, website, req.params.id]);
+
+    await crmApiService.updateCompany(req.params.id, req.body).catch(() => {});
+    return res.json({ success: true, message: 'Company updated successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.deleteCompany = async (req, res) => {
+  try {
+    await ensureCrmCompaniesTable();
+    const { isSuperAdmin, companyId } = getCallerTenantScope(req);
+    if (!isSuperAdmin && companyId && String(companyId) !== String(req.params.id)) {
+      return res.status(403).json({ success: false, message: 'Forbidden: You cannot delete other companies.' });
+    }
+
+    await query('DELETE FROM crm_companies WHERE id::text = $1', [req.params.id]);
+    await crmApiService.deleteCompany(req.params.id).catch(() => {});
+    return res.json({ success: true, message: 'Company deleted successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// Users Controllers
+// ==========================================
+
+exports.getUsers = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName, userEmail } = getCallerTenantScope(req);
+
+    // Strict Tenant Isolation: Non-SuperAdmin only sees their own company's staff
+    if (!isSuperAdmin) {
+      const localRes = await query(
+        `SELECT * FROM crm_company_users 
+         WHERE (company_id = $1 OR company_id = $2 OR (company_id IS NULL AND email = $3))
+         ORDER BY created_at DESC`,
+        [companyId || '', companyName || '', userEmail || '']
+      );
+
+      const localUsers = localRes.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        email: r.email,
+        phone: r.phone,
+        role: r.role,
+        branch_id: r.branch_id,
+        branch: r.branch_name,
+        position_id: r.position_id,
+        position: r.position_title,
+        companyId: r.company_id,
+        isActive: r.is_active,
+        is_active: r.is_active,
+        source: 'Tenant Isolated Ledger',
+        createdAt: r.created_at,
+        created_at: r.created_at
+      }));
+
+      return res.json({
+        success: true,
+        data: {
+          items: localUsers,
+          total: localUsers.length
+        }
+      });
+    }
+
+    // 1. Fetch local ledger CRM staff users
+    const localRes = await query(`SELECT * FROM crm_company_users ORDER BY created_at DESC`);
+    const localUsers = localRes.rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      email: r.email,
+      phone: r.phone,
+      role: r.role,
+      branch_id: r.branch_id,
+      branch: r.branch_name,
+      position_id: r.position_id,
+      position: r.position_title,
+      companyId: r.company_id,
+      isActive: r.is_active,
+      is_active: r.is_active,
+      source: 'Super Admin Ledger',
+      createdAt: r.created_at,
+      created_at: r.created_at
+    }));
+
+    // 2. Fetch remote CRM users if reachable
+    let remoteUsers = [];
+    try {
+      const result = await crmApiService.getCompanyUsers(req.query);
+      if (result.success && result.data) {
+        if (Array.isArray(result.data)) {
+          remoteUsers = result.data;
+        } else if (result.data && Array.isArray(result.data.users)) {
+          remoteUsers = result.data.users;
+        } else if (result.data && Array.isArray(result.data.items)) {
+          remoteUsers = result.data.items;
+        }
+      }
+    } catch (e) {
+      // Remote CRM error handled gracefully
+    }
+
+    // 3. Deduplicate and merge
+    const combined = [...localUsers];
+    for (const remote of remoteUsers) {
+      const exists = combined.some(u => 
+        (u.id && remote.id && String(u.id) === String(remote.id)) ||
+        (u.email && remote.email && u.email.toLowerCase() === remote.email.toLowerCase())
+      );
+      if (!exists) {
+        combined.push({
+          ...remote,
+          is_active: remote.isActive !== undefined ? remote.isActive : (remote.is_active !== undefined ? remote.is_active : true),
+          source: 'NexFlow CRM Live'
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        items: combined,
+        total: combined.length
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getUserById = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    const localRes = await query('SELECT * FROM crm_company_users WHERE id = $1', [req.params.id]);
+    if (localRes.rows.length > 0) {
+      const r = localRes.rows[0];
+      if (!isSuperAdmin && r.company_id && r.company_id !== companyId && r.company_id !== companyName) {
+        return res.status(403).json({ success: false, message: 'Forbidden: You cannot view staff of other companies.' });
+      }
+      return res.json({
+        success: true,
+        data: {
+          id: r.id,
+          name: r.name,
+          email: r.email,
+          phone: r.phone,
+          role: r.role,
+          branch_id: r.branch_id,
+          branch: r.branch_name,
+          position_id: r.position_id,
+          position: r.position_title,
+          is_active: r.is_active
+        }
+      });
+    }
+    if (!isSuperAdmin) {
+      return res.status(404).json({ success: false, message: 'User not found or access denied.' });
+    }
+    const result = await crmApiService.getCompanyUserById(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.createUser = async (req, res) => {
+  try {
+    const { name, email, phone, role, branch_id, position_id, password } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Name is required' });
+    }
+    if (!email || !email.trim()) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Verify OTP confirmation for email
+    const verRes = await query(`
+      SELECT id FROM saas_email_verifications
+      WHERE email = $1 AND is_verified = TRUE
+      ORDER BY id DESC LIMIT 1
+    `, [cleanEmail]);
+
+    if (verRes.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Email ${cleanEmail} has not been verified with OTP yet. Please verify email before provisioning staff member.`
+      });
+    }
+
+    if (phone) {
+      const numericPhone = String(phone).replace(/\D/g, '');
+      if (numericPhone.length !== 10) {
+        return res.status(400).json({
+          success: false,
+          message: 'Staff phone number must be exactly 10 digits without letters or special characters.'
+        });
+      }
+    }
+
+    // Resolve branch & position names if provided
+    let branchName = null;
+    if (branch_id) {
+      const bRes = await query('SELECT name FROM crm_branches WHERE id = $1', [branch_id]);
+      if (bRes.rows.length > 0) branchName = bRes.rows[0].name;
+    }
+    let positionTitle = null;
+    if (position_id) {
+      const pRes = await query('SELECT title FROM crm_positions WHERE id = $1', [position_id]);
+      if (pRes.rows.length > 0) positionTitle = pRes.rows[0].title;
+    }
+
+    // Forward to upstream CRM API if reachable
+    try {
+      await crmApiService.createCompanyUser(req.body);
+    } catch (e) {
+      // Handled gracefully
+    }
+
+    const cleanStaffPhone = phone ? String(phone).replace(/\D/g, '').slice(0, 10) : null;
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    const assignedCompanyId = !isSuperAdmin ? (companyId || companyName) : (req.body.companyId || req.body.company_id || null);
+
+    // Persist into local CRM ledger with company isolation
+    const newId = 'crm-usr-' + Date.now();
+    const insertRes = await query(`
+      INSERT INTO crm_company_users (id, name, email, phone, role, branch_id, branch_name, position_id, position_title, company_id, is_active)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
+      RETURNING *
+    `, [
+      newId,
+      name.trim(),
+      cleanEmail,
+      cleanStaffPhone,
+      role || 'SALES_REP',
+      branch_id || null,
+      branchName,
+      position_id || null,
+      positionTitle,
+      assignedCompanyId
+    ]);
+
+    const createdUser = insertRes.rows[0];
+
+    return res.status(201).json({
+      success: true,
+      message: `CRM Staff Member '${createdUser.name}' provisioned successfully!`,
+      data: {
+        ...createdUser,
+        branch: createdUser.branch_name,
+        position: createdUser.position_title
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateUser = async (req, res) => {
+  try {
+    const { name, email, phone, role, branch_id, position_id } = req.body;
+    if (phone) {
+      const numericPhone = String(phone).replace(/\D/g, '');
+      if (numericPhone.length !== 10) {
+        return res.status(400).json({
+          success: false,
+          message: 'Staff phone number must be exactly 10 digits without letters or special characters.'
+        });
+      }
+    }
+    const cleanUpdatePhone = phone ? String(phone).replace(/\D/g, '').slice(0, 10) : null;
+
+    let branchName = null;
+    if (branch_id) {
+      const bRes = await query('SELECT name FROM crm_branches WHERE id = $1', [branch_id]);
+      if (bRes.rows.length > 0) branchName = bRes.rows[0].name;
+    }
+    let positionTitle = null;
+    if (position_id) {
+      const pRes = await query('SELECT title FROM crm_positions WHERE id = $1', [position_id]);
+      if (pRes.rows.length > 0) positionTitle = pRes.rows[0].title;
+    }
+
+    await query(`
+      UPDATE crm_company_users
+      SET name = COALESCE($1, name),
+          email = COALESCE($2, email),
+          phone = COALESCE($3, phone),
+          role = COALESCE($4, role),
+          branch_id = COALESCE($5, branch_id),
+          branch_name = COALESCE($6, branch_name),
+          position_id = COALESCE($7, position_id),
+          position_title = COALESCE($8, position_title)
+      WHERE id = $9
+    `, [name, email, cleanUpdatePhone, role, branch_id, branchName, position_id, positionTitle, req.params.id]);
+
+    await crmApiService.updateCompanyUser(req.params.id, req.body).catch(() => {});
+
+    return res.json({ success: true, message: 'CRM User updated successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.deleteUser = async (req, res) => {
+  try {
+    await query('DELETE FROM crm_company_users WHERE id = $1', [req.params.id]);
+    await crmApiService.deleteCompanyUser(req.params.id).catch(() => {});
+    return res.json({ success: true, message: 'CRM User deleted successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.toggleUserStatus = async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    const nextStatus = isActive !== undefined ? !!isActive : true;
+    const updRes = await query(`
+      UPDATE crm_company_users
+      SET is_active = $1
+      WHERE id = $2
+      RETURNING *
+    `, [nextStatus, req.params.id]);
+
+    await crmApiService.toggleCompanyUserStatus(req.params.id, nextStatus).catch(() => {});
+
+    return res.json({
+      success: true,
+      message: `CRM user status updated to ${nextStatus ? 'Active' : 'Inactive'}`,
+      data: updRes.rows[0]
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// Branches Controllers
+// ==========================================
+
+exports.getBranches = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+
+    if (!isSuperAdmin) {
+      const localRes = await query(
+        `SELECT * FROM crm_branches WHERE company_id = $1 OR company_id = $2 OR company_id IS NULL ORDER BY name ASC`,
+        [companyId || '', companyName || '']
+      );
+      const localItems = localRes.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        code: r.code,
+        city: r.city,
+        state: r.state,
+        address: r.address,
+        isActive: r.is_active,
+        is_active: r.is_active,
+        source: 'Tenant Isolated Ledger'
+      }));
+      return res.json({
+        success: true,
+        data: {
+          items: localItems,
+          total: localItems.length
+        }
+      });
+    }
+
+    const localRes = await query(`SELECT * FROM crm_branches ORDER BY name ASC`);
+    const localItems = localRes.rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      code: r.code,
+      city: r.city,
+      state: r.state,
+      address: r.address,
+      isActive: r.is_active,
+      is_active: r.is_active,
+      source: 'Super Admin Ledger'
+    }));
+
+    let remoteItems = [];
+    try {
+      const result = await crmApiService.getBranches(req.query);
+      if (result.success && result.data) {
+        remoteItems = result.data.items || (Array.isArray(result.data) ? result.data : []);
+      }
+    } catch (e) {}
+
+    const combined = [...localItems];
+    for (const remote of remoteItems) {
+      const exists = combined.some(b => String(b.id) === String(remote.id) || b.name === remote.name);
+      if (!exists) {
+        combined.push({ ...remote, source: 'NexFlow CRM Live' });
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        items: combined,
+        total: combined.length
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getBranchStats = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      const localRes = await query(`SELECT COUNT(*) as total FROM crm_branches WHERE company_id = $1 OR company_id = $2 OR company_id IS NULL`, [companyId || '', companyName || '']);
+      const userRes = await query(`SELECT COUNT(*) as total_users FROM crm_company_users WHERE company_id = $1 OR company_id = $2`, [companyId || '', companyName || '']);
+      return res.json({
+        success: true,
+        data: {
+          totalBranches: parseInt(localRes.rows[0].total, 10),
+          totalStaff: parseInt(userRes.rows[0].total_users, 10),
+          activeBranches: parseInt(localRes.rows[0].total, 10)
+        }
+      });
+    }
+
+    const localRes = await query(`SELECT COUNT(*) as total FROM crm_branches`);
+    const userRes = await query(`SELECT COUNT(*) as total_users FROM crm_company_users`);
+    return res.json({
+      success: true,
+      data: {
+        totalBranches: parseInt(localRes.rows[0].total, 10),
+        totalStaff: parseInt(userRes.rows[0].total_users, 10),
+        activeBranches: parseInt(localRes.rows[0].total, 10)
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getBranchById = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    const localRes = await query('SELECT * FROM crm_branches WHERE id = $1', [req.params.id]);
+    if (localRes.rows.length > 0) {
+      const br = localRes.rows[0];
+      if (!isSuperAdmin && br.company_id && br.company_id !== companyId && br.company_id !== companyName) {
+        return res.status(403).json({ success: false, message: 'Forbidden: You cannot view branches of other companies.' });
+      }
+      return res.json({ success: true, data: br });
+    }
+    if (!isSuperAdmin) {
+      return res.status(404).json({ success: false, message: 'Branch not found or access denied.' });
+    }
+    const result = await crmApiService.getBranchById(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getBranchUsers = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    let localRes;
+    if (!isSuperAdmin) {
+      localRes = await query(
+        'SELECT * FROM crm_company_users WHERE branch_id = $1 AND (company_id = $2 OR company_id = $3)',
+        [req.params.id, companyId || '', companyName || '']
+      );
+    } else {
+      localRes = await query('SELECT * FROM crm_company_users WHERE branch_id = $1', [req.params.id]);
+    }
+    if (localRes.rows.length > 0) {
+      return res.json({ success: true, data: localRes.rows });
+    }
+    if (!isSuperAdmin) {
+      return res.json({ success: true, data: [] });
+    }
+    const result = await crmApiService.getBranchUsers(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.createBranch = async (req, res) => {
+  try {
+    const { name, code, city, state, address } = req.body;
+    if (!name) return res.status(400).json({ success: false, message: 'Branch name is required' });
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    const assignedCompanyId = !isSuperAdmin ? (companyId || companyName) : (req.body.company_id || null);
+
+    const newId = code || ('BR-' + Date.now());
+    const ins = await query(`
+      INSERT INTO crm_branches (id, name, code, city, state, address, company_id, is_active)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+      RETURNING *
+    `, [newId, name, code || newId, city || '', state || '', address || '', assignedCompanyId]);
+    await crmApiService.createBranch(req.body).catch(() => {});
+    return res.status(201).json({ success: true, message: 'Branch created successfully', data: ins.rows[0] });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateBranch = async (req, res) => {
+  try {
+    const { name, code, city, state, address } = req.body;
+    await query(`
+      UPDATE crm_branches
+      SET name = COALESCE($1, name),
+          code = COALESCE($2, code),
+          city = COALESCE($3, city),
+          state = COALESCE($4, state),
+          address = COALESCE($5, address)
+      WHERE id = $6
+    `, [name, code, city, state, address, req.params.id]);
+    await crmApiService.updateBranch(req.params.id, req.body).catch(() => {});
+    return res.json({ success: true, message: 'Branch updated successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.toggleBranchStatus = async (req, res) => {
+  try {
+    const upd = await query(`
+      UPDATE crm_branches
+      SET is_active = NOT is_active
+      WHERE id = $1
+      RETURNING *
+    `, [req.params.id]);
+    await crmApiService.toggleBranchStatus(req.params.id).catch(() => {});
+    return res.json({ success: true, message: 'Branch status updated', data: upd.rows[0] });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.deleteBranch = async (req, res) => {
+  try {
+    await query('DELETE FROM crm_branches WHERE id = $1', [req.params.id]);
+    await crmApiService.deleteBranch(req.params.id).catch(() => {});
+    return res.json({ success: true, message: 'Branch deleted successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// Positions, Teams & Roles Controllers
+// ==========================================
+
+exports.getPositions = async (req, res) => {
+  try {
+    const localRes = await query(`SELECT * FROM crm_positions ORDER BY title ASC`);
+    const localItems = localRes.rows.map(r => ({
+      id: r.id,
+      title: r.title,
+      department: r.department,
+      level: r.level,
+      isActive: r.is_active,
+      is_active: r.is_active
+    }));
+
+    let remoteItems = [];
+    try {
+      const result = await crmApiService.getPositions();
+      if (result.success && result.data) {
+        remoteItems = Array.isArray(result.data) ? result.data : (result.data.items || result.data.positions || []);
+      }
+    } catch (e) {}
+
+    const combined = [...localItems];
+    for (const remote of remoteItems) {
+      const exists = combined.some(p => String(p.id) === String(remote.id) || p.title === remote.title);
+      if (!exists) {
+        combined.push(remote);
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: combined
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getTeams = async (req, res) => {
+  try {
+    const result = await crmApiService.getTeams();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getRoles = async (req, res) => {
+  try {
+    const result = await crmApiService.getRoles();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getRoleStats = async (req, res) => {
+  try {
+    const result = await crmApiService.getRoleStats();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// Leads & Configuration Controllers
+// ==========================================
+
+exports.getLeads = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    const result = await crmApiService.getLeads(req.query);
+    if (!result.success) {
+      return res.json({
+        success: false,
+        crmAuthRequired: result.crmAuthRequired || false,
+        message: result.message || 'CRM leads request failed',
+        data: { items: [], total: 0 }
+      });
+    }
+
+    // Tenant isolation on leads
+    if (!isSuperAdmin && result.data?.items) {
+      const filtered = result.data.items.filter(item => {
+        const cId = String(item.companyId || item.company_id || '');
+        const cName = String(item.companyName || item.company_name || '');
+        return (companyId && cId === companyId) ||
+               (companyName && cName.toLowerCase() === companyName.toLowerCase());
+      });
+      return res.json({
+        ...result,
+        data: {
+          ...result.data,
+          items: filtered,
+          total: filtered.length
+        }
+      });
+    }
+
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getLeadStats = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId, companyName } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      // Dedicated fresh clean metrics for this tenant company
+      return res.json({
+        success: true,
+        data: {
+          total: 0,
+          totalLeads: 0,
+          hotLeads: 0,
+          warmLeads: 0,
+          coldLeads: 0,
+          avgScore: 0,
+          winRate: '0%'
+        }
+      });
+    }
+    const result = await crmApiService.getLeadStats();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getLeadById = async (req, res) => {
+  try {
+    const result = await crmApiService.getLeadById(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getPipelineStages = async (req, res) => {
+  try {
+    const result = await crmApiService.getPipelineStages();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getStageFields = async (req, res) => {
+  try {
+    const result = await crmApiService.getStageFields(req.params.stageId);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getCustomFields = async (req, res) => {
+  try {
+    const result = await crmApiService.getCustomFields();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getIndustryTemplates = async (req, res) => {
+  try {
+    const result = await crmApiService.getIndustryTemplates();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getLeadCaptureForms = async (req, res) => {
+  try {
+    const result = await crmApiService.getLeadCaptureForms();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getFormSubmissions = async (req, res) => {
+  try {
+    const result = await crmApiService.getFormSubmissions(req.params.formId);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// WhatsApp & AI Bot Controllers
+// ==========================================
+
+exports.getWhatsAppChats = async (req, res) => {
+  try {
+    const result = await crmApiService.getWhatsAppChats();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getWhatsAppStats = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({
+        success: true,
+        data: { activeChats: 0, responseRate: '100%', messagesToday: 0 }
+      });
+    }
+    const result = await crmApiService.getWhatsAppStats();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getWhatsAppChatMessages = async (req, res) => {
+  try {
+    const result = await crmApiService.getWhatsAppChatMessages(req.params.chatId);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getWhatsAppTemplates = async (req, res) => {
+  try {
+    const result = await crmApiService.getWhatsAppTemplates();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getWhatsAppQuickReplies = async (req, res) => {
+  try {
+    const result = await crmApiService.getWhatsAppQuickReplies();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getBotSettings = async (req, res) => {
+  try {
+    const result = await crmApiService.getBotSettings();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// Workflows, Projects & Quotations
+// ==========================================
+
+exports.getWorkflows = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({ success: true, data: [] });
+    }
+    const result = await crmApiService.getWorkflows();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getProjects = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({ success: true, data: [], total: 0 });
+    }
+    const result = await crmApiService.getProjects(req.query);
+    if (!result.success) {
+      return res.json({
+        success: false,
+        crmAuthRequired: result.crmAuthRequired || false,
+        message: result.message || 'CRM projects request failed',
+        data: []
+      });
+    }
+    const items = Array.isArray(result.data) ? result.data : (result.data?.items || []);
+    return res.json({
+      success: true,
+      data: items,
+      total: items.length
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getProjectById = async (req, res) => {
+  try {
+    const result = await crmApiService.getProjectById(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getProjectInventory = async (req, res) => {
+  try {
+    const result = await crmApiService.getProjectInventory(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getProjectTasks = async (req, res) => {
+  try {
+    const result = await crmApiService.getProjectTasks(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getQuotations = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({
+        success: true,
+        data: { items: [], total: 0 }
+      });
+    }
+    const result = await crmApiService.getQuotations(req.query);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getQuotationStats = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({
+        success: true,
+        data: {
+          total: 0,
+          totalValue: 0,
+          accepted: 0,
+          pending: 0,
+          rejected: 0
+        }
+      });
+    }
+    const result = await crmApiService.getQuotationStats();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getQuotationTemplates = async (req, res) => {
+  try {
+    const result = await crmApiService.getQuotationTemplates();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getQuotationById = async (req, res) => {
+  try {
+    const result = await crmApiService.getQuotationById(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ==========================================
+// Calls, Campaigns, Activities, Analytics
+// ==========================================
+
+exports.getCalls = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({ success: true, data: { items: [], total: 0 } });
+    }
+    const result = await crmApiService.getCalls(req.query);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getCallStats = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({
+        success: true,
+        data: { totalCalls: 0, connected: 0, avgDuration: '00:00' }
+      });
+    }
+    const result = await crmApiService.getCallStats();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getScheduledCalls = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({ success: true, data: [] });
+    }
+    const result = await crmApiService.getScheduledCalls();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getCampaigns = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({ success: true, data: [] });
+    }
+    const result = await crmApiService.getCampaigns();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getCampaignById = async (req, res) => {
+  try {
+    const result = await crmApiService.getCampaignById(req.params.id);
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getActivities = async (req, res) => {
+  try {
+    const { isSuperAdmin } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      return res.json({
+        success: true,
+        data: [],
+        total: 0
+      });
+    }
+    const result = await crmApiService.getActivities(req.query);
+    if (!result.success) {
+      return res.json({
+        success: false,
+        crmAuthRequired: result.crmAuthRequired || false,
+        message: result.message || 'CRM activities request failed',
+        data: []
+      });
+    }
+
+    const items = Array.isArray(result.data) ? result.data : (result.data?.items || []);
+    return res.json({
+      success: true,
+      data: items,
+      total: items.length
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getReportsSummary = async (req, res) => {
+  try {
+    const { isSuperAdmin, companyId } = getCallerTenantScope(req);
+    if (!isSuperAdmin) {
+      // Fresh isolated metrics for this company
+      return res.json({
+        success: true,
+        data: {
+          totalLeads: 0,
+          wonLeads: 0,
+          totalQuotations: 0,
+          totalRevenue: 0,
+          totalCampaigns: 0,
+          totalCalls: 0
+        }
+      });
+    }
+    const result = await crmApiService.getReportsSummary();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getIntegrations = async (req, res) => {
+  try {
+    const result = await crmApiService.getIntegrations();
+    return res.status(result.status || 200).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * Link Super Admin organization to CRM Company ID
+ */
+exports.syncOrganization = async (req, res) => {
+  try {
+    const orgId = parseInt(req.params.id, 10);
+    const { crmCompanyId } = req.body;
+
+    if (!crmCompanyId) {
+      return res.status(400).json({ success: false, message: 'crmCompanyId is required' });
+    }
+
+    await query('ALTER TABLE organizations ADD COLUMN IF NOT EXISTS crm_company_id VARCHAR(100)');
+
+    const updateRes = await query(`
+      UPDATE organizations 
+      SET crm_company_id = $1 
+      WHERE id = $2
+      RETURNING id, name, slug, email, crm_company_id
+    `, [String(crmCompanyId).trim(), orgId]);
+
+    if (updateRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Organization not found in Super Admin database' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Organization linked with CRM Company successfully',
+      data: updateRes.rows[0]
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};

@@ -15,21 +15,37 @@ async function authenticateSuperAdmin(req, res, next) {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    const { query } = require('../db/database');
 
-    // Fetch user's assigned roles
-    const roles = await getUserRoles(decoded.id);
-    const isSuperAdmin = roles.some(r => r.slug === 'super_admin') || decoded.role === 'super_admin' || decoded.role_name === 'SUPER_ADMIN';
+    // Fetch user details from database
+    const userRes = await query(
+      "SELECT id, name, email, role_name, role_display_name, is_active, organization_id, organization_name, crm_company_id FROM users WHERE id = $1",
+      [decoded.id]
+    );
 
-    // Verify user is an authorized internal admin (either has an internal role, or is legacy super admin)
-    if (roles.length === 0 && !isSuperAdmin && decoded.organization_id) {
-      return res.status(403).json({
+    if (userRes.rows.length === 0 || !userRes.rows[0].is_active) {
+      return res.status(401).json({
         success: false,
-        message: 'Access forbidden. Only authorized administrators can access this console.'
+        message: 'Account not found or inactive.'
       });
     }
 
+    const dbUser = userRes.rows[0];
+
+    // Fetch user's assigned roles
+    const roles = await getUserRoles(dbUser.id);
+    const isSuperAdmin = roles.some(r => r.slug === 'super_admin') || dbUser.role_name === 'SUPER_ADMIN' || decoded.role === 'super_admin';
+
     req.user = {
-      ...decoded,
+      id: dbUser.id,
+      name: dbUser.name,
+      email: dbUser.email,
+      role: isSuperAdmin ? 'super_admin' : (roles[0]?.slug || 'company_admin'),
+      role_name: dbUser.role_name,
+      role_display_name: dbUser.role_display_name,
+      organization_id: dbUser.organization_id || decoded.organization_id || null,
+      organization_name: dbUser.organization_name || decoded.organization_name || null,
+      crm_company_id: dbUser.crm_company_id || decoded.crm_company_id || null,
       roles,
       isSuperAdmin
     };

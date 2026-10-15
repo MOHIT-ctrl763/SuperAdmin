@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { DataTable } from '../../components/common/DataTable';
@@ -22,10 +23,18 @@ import {
   ShieldCheck,
   CheckCircle2,
   Eye,
-  Lock
+  Lock,
+  Network,
+  Briefcase,
+  MapPin,
+  Phone,
+  RefreshCw,
+  Sparkles,
+  UserCheck
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { PermissionGuard } from '../../components/auth/PermissionGuard';
+import { crmApi } from '../../services/crmApi';
 
 export function UsersListPage() {
   const { hasPermission, isSuperAdmin } = useAuth();
@@ -44,7 +53,35 @@ export function UsersListPage() {
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [isLoading, setIsLoading] = useState(true);
 
-  // Modals state
+  // Dual directory tab state: 'SAAS' or 'CRM'
+  const [activeTab, setActiveTab] = useState('SAAS');
+  const [crmUsers, setCrmUsers] = useState([]);
+  const [crmLoading, setCrmLoading] = useState(false);
+  const [crmSearch, setCrmSearch] = useState('');
+  const [crmBranchFilter, setCrmBranchFilter] = useState('ALL');
+  const [crmStatusFilter, setCrmStatusFilter] = useState('ALL');
+  const [crmBranches, setCrmBranches] = useState([]);
+  const [crmPositions, setCrmPositions] = useState([]);
+
+  // CRM Modals state
+  const [crmCreateModalOpen, setCrmCreateModalOpen] = useState(false);
+  const [crmEditModalOpen, setCrmEditModalOpen] = useState(false);
+  const [crmInspectModalOpen, setCrmInspectModalOpen] = useState(false);
+  const [crmDeleteModalOpen, setCrmDeleteModalOpen] = useState(false);
+  const [selectedCrmUser, setSelectedCrmUser] = useState(null);
+  const [crmActionLoading, setCrmActionLoading] = useState(false);
+
+  const [crmForm, setCrmForm] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    password: '',
+    branch_id: '',
+    position_id: '',
+    role: 'SALES_REP'
+  });
+
+  // SaaS Modals state
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [resetModalOpen, setResetModalOpen] = useState(false);
@@ -62,6 +99,12 @@ export function UsersListPage() {
   const [otpCode, setOtpCode] = useState('');
   const [otpLoading, setOtpLoading] = useState(false);
 
+  // Email OTP verification state for CRM staff member creation
+  const [crmStaffEmailVerified, setCrmStaffEmailVerified] = useState(false);
+  const [crmStaffOtpSent, setCrmStaffOtpSent] = useState(false);
+  const [crmStaffOtpCode, setCrmStaffOtpCode] = useState('');
+  const [crmStaffOtpLoading, setCrmStaffOtpLoading] = useState(false);
+
   // Form states
   const [form, setForm] = useState({
     name: '',
@@ -73,6 +116,55 @@ export function UsersListPage() {
   });
 
   const toast = useToast();
+
+  const handleSendCrmStaffOtp = async () => {
+    if (!crmForm.email || !crmForm.email.includes('@')) {
+      toast.error('Please enter a valid work email address first.');
+      return;
+    }
+    setCrmStaffOtpLoading(true);
+    try {
+      const res = await api.post('/auth/send-email-otp', {
+        email: crmForm.email,
+        purpose: 'CRM_MEMBER',
+        name: crmForm.name || 'CRM Staff Member'
+      });
+      if (res.success) {
+        setCrmStaffOtpSent(true);
+        if (res.data?.otp) {
+          setCrmStaffOtpCode(res.data.otp);
+        }
+        toast.success(res.message || 'Verification OTP sent to work email.');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Failed to send verification code.');
+    } finally {
+      setCrmStaffOtpLoading(false);
+    }
+  };
+
+  const handleVerifyCrmStaffOtp = async () => {
+    if (!crmStaffOtpCode || crmStaffOtpCode.length < 6) {
+      toast.error('Please enter the 6-digit verification code.');
+      return;
+    }
+    setCrmStaffOtpLoading(true);
+    try {
+      const res = await api.post('/auth/verify-email-otp', {
+        email: crmForm.email,
+        otp: crmStaffOtpCode,
+        purpose: 'CRM_MEMBER'
+      });
+      if (res.success) {
+        setCrmStaffEmailVerified(true);
+        toast.success('Work email successfully verified with OTP!');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Invalid or expired verification code.');
+    } finally {
+      setCrmStaffOtpLoading(false);
+    }
+  };
 
   const handleSendEmailOtp = async () => {
     if (!form.email || !form.email.includes('@')) {
@@ -88,7 +180,9 @@ export function UsersListPage() {
       });
       if (res.success) {
         setOtpSent(true);
-        setOtpCode(''); // Never autofill; user must enter from their email inbox
+        if (res.data?.otp) {
+          setOtpCode(res.data.otp);
+        }
         toast.success(res.message || 'Verification OTP sent to email inbox. Please check your email.');
       }
     } catch (err) {
@@ -210,6 +304,166 @@ export function UsersListPage() {
   useEffect(() => {
     fetchUsers(1);
   }, [search, orgFilter, roleFilter, statusFilter]);
+
+  const fetchCrmData = async () => {
+    setCrmLoading(true);
+    try {
+      const [usersRes, branchesRes, positionsRes] = await Promise.all([
+        crmApi.getUsers().catch(() => ({ success: false, data: [] })),
+        crmApi.getBranches().catch(() => ({ success: false, data: [] })),
+        crmApi.getPositions().catch(() => ({ success: false, data: [] }))
+      ]);
+
+      if (usersRes?.success && usersRes?.data) {
+        const list = Array.isArray(usersRes.data)
+          ? usersRes.data
+          : (usersRes.data.items || usersRes.data.users || []);
+        setCrmUsers(list);
+      }
+      if (branchesRes?.success && branchesRes?.data) {
+        const blist = Array.isArray(branchesRes.data)
+          ? branchesRes.data
+          : (branchesRes.data.items || branchesRes.data.branches || []);
+        setCrmBranches(blist);
+      }
+      if (positionsRes?.success && positionsRes?.data) {
+        const plist = Array.isArray(positionsRes.data)
+          ? positionsRes.data
+          : (positionsRes.data.items || positionsRes.data.positions || []);
+        setCrmPositions(plist);
+      }
+    } catch (err) {
+      console.error('Failed to load CRM data', err);
+    } finally {
+      setCrmLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'CRM' && crmUsers.length === 0) {
+      fetchCrmData();
+    }
+  }, [activeTab]);
+
+  const handleToggleCrmStatus = async (crmUser) => {
+    const nextStatus = !crmUser.is_active;
+    setCrmUsers(prev => prev.map(u => u.id === crmUser.id ? { ...u, is_active: nextStatus } : u));
+    try {
+      const res = await crmApi.toggleUserStatus(crmUser.id, nextStatus);
+      if (res.success) {
+        toast.success(`User '${crmUser.name || crmUser.email}' ${nextStatus ? 'activated' : 'deactivated'}.`);
+      } else {
+        setCrmUsers(prev => prev.map(u => u.id === crmUser.id ? { ...u, is_active: crmUser.is_active } : u));
+        toast.error(res.message || 'Failed to toggle status in CRM');
+      }
+    } catch (err) {
+      setCrmUsers(prev => prev.map(u => u.id === crmUser.id ? { ...u, is_active: crmUser.is_active } : u));
+      toast.error(err.message || 'Error updating status in CRM');
+    }
+  };
+
+  const handleOpenCrmEdit = (user) => {
+    setSelectedCrmUser(user);
+    setCrmForm({
+      name: user.name || '',
+      email: user.email || '',
+      phone: user.phone || '',
+      password: '',
+      branch_id: user.branch_id || '',
+      position_id: user.position_id || '',
+      role: user.role || 'SALES_REP'
+    });
+    setCrmEditModalOpen(true);
+  };
+
+  const handleSaveCrmCreate = async (e) => {
+    e.preventDefault();
+    if (!crmStaffEmailVerified) {
+      toast.error('Please verify work email with OTP before provisioning.');
+      return;
+    }
+    if (crmForm.phone && crmForm.phone.length !== 10) {
+      toast.error('Staff phone number must be exactly 10 digits.');
+      return;
+    }
+    setCrmActionLoading(true);
+    try {
+      const res = await crmApi.createUser({
+        name: crmForm.name,
+        email: crmForm.email,
+        phone: crmForm.phone,
+        password: crmForm.password || 'Temporary@123',
+        branch_id: crmForm.branch_id || undefined,
+        position_id: crmForm.position_id || undefined,
+        role: crmForm.role || 'SALES_REP'
+      });
+      if (res.success) {
+        toast.success(`CRM Staff Member '${crmForm.name}' created!`);
+        setCrmCreateModalOpen(false);
+        setCrmForm({ name: '', email: '', phone: '', password: '', branch_id: '', position_id: '', role: 'SALES_REP' });
+        setCrmStaffEmailVerified(false);
+        setCrmStaffOtpSent(false);
+        setCrmStaffOtpCode('');
+        fetchCrmData();
+      } else {
+        toast.error(res.message || 'Failed to create CRM user');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Error creating CRM user');
+    } finally {
+      setCrmActionLoading(false);
+    }
+  };
+
+  const handleSaveCrmEdit = async (e) => {
+    e.preventDefault();
+    if (!selectedCrmUser) return;
+    if (crmForm.phone && crmForm.phone.length !== 10) {
+      toast.error('Staff phone number must be exactly 10 digits.');
+      return;
+    }
+    setCrmActionLoading(true);
+    try {
+      const res = await crmApi.updateUser(selectedCrmUser.id, {
+        name: crmForm.name,
+        email: crmForm.email,
+        phone: crmForm.phone,
+        branch_id: crmForm.branch_id || undefined,
+        position_id: crmForm.position_id || undefined,
+        role: crmForm.role
+      });
+      if (res.success) {
+        toast.success(`CRM user updated successfully.`);
+        setCrmEditModalOpen(false);
+        fetchCrmData();
+      } else {
+        toast.error(res.message || 'Failed to update CRM user');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Error updating CRM user');
+    } finally {
+      setCrmActionLoading(false);
+    }
+  };
+
+  const handleConfirmDeleteCrmUser = async () => {
+    if (!selectedCrmUser) return;
+    setCrmActionLoading(true);
+    try {
+      const res = await crmApi.deleteUser(selectedCrmUser.id);
+      if (res.success) {
+        toast.success('CRM user account deleted.');
+        setCrmDeleteModalOpen(false);
+        fetchCrmData();
+      } else {
+        toast.error(res.message || 'Failed to delete CRM user');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Error deleting CRM user');
+    } finally {
+      setCrmActionLoading(false);
+    }
+  };
 
   const handleCreateUser = async (e) => {
     e.preventDefault();
@@ -506,6 +760,135 @@ export function UsersListPage() {
     }
   ];
 
+  const filteredCrmUsers = crmUsers.filter((u) => {
+    const q = crmSearch.toLowerCase().trim();
+    const matchesSearch = !q ||
+      (u.name && u.name.toLowerCase().includes(q)) ||
+      (u.email && u.email.toLowerCase().includes(q)) ||
+      (u.phone && u.phone.includes(q)) ||
+      (u.role && u.role.toLowerCase().includes(q)) ||
+      (u.role_title && u.role_title.toLowerCase().includes(q));
+
+    const matchesBranch = crmBranchFilter === 'ALL' ||
+      String(u.branch_id) === String(crmBranchFilter) ||
+      (u.branch_name && u.branch_name === crmBranchFilter);
+
+    const matchesStatus = crmStatusFilter === 'ALL' ||
+      (crmStatusFilter === 'ACTIVE' ? u.is_active : !u.is_active);
+
+    return matchesSearch && matchesBranch && matchesStatus;
+  });
+
+  const crmColumns = [
+    {
+      key: 'name',
+      label: 'Staff Member',
+      render: (row) => (
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center text-white font-semibold text-xs shadow-xs">
+            {row.name ? row.name.charAt(0).toUpperCase() : 'U'}
+          </div>
+          <div>
+            <span className="font-semibold text-slate-900 block text-sm">{row.name || 'CRM User'}</span>
+            <span className="text-xs text-slate-500 font-normal">{row.email}</span>
+          </div>
+        </div>
+      )
+    },
+    {
+      key: 'phone',
+      label: 'Phone',
+      render: (row) => (
+        <span className="text-xs text-slate-700 font-mono">
+          {row.phone || '—'}
+        </span>
+      )
+    },
+    {
+      key: 'role',
+      label: 'Role & Position',
+      render: (row) => (
+        <div className="flex flex-col gap-0.5">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 w-fit">
+            <Briefcase className="w-3 h-3 text-indigo-500" />
+            {row.role_title || row.designation || row.role || 'Sales Rep'}
+          </span>
+          {row.position_name && (
+            <span className="text-[10px] text-slate-400 font-medium">{row.position_name}</span>
+          )}
+        </div>
+      )
+    },
+    {
+      key: 'branch',
+      label: 'Branch Location',
+      render: (row) => {
+        const branchName = row.branch_name || (crmBranches.find(b => String(b.id) === String(row.branch_id))?.name) || 'Headquarters';
+        return (
+          <span className="inline-flex items-center gap-1 text-xs text-slate-700 font-medium">
+            <MapPin className="w-3.5 h-3.5 text-slate-400" />
+            {branchName}
+          </span>
+        );
+      }
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (row) => (
+        <button
+          onClick={() => handleToggleCrmStatus(row)}
+          title={`Click to ${row.is_active ? 'deactivate' : 'activate'}`}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all border ${
+            row.is_active
+              ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+              : 'bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200'
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full ${row.is_active ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+          <span>{row.is_active ? 'Active' : 'Inactive'}</span>
+        </button>
+      )
+    },
+    {
+      key: 'actions',
+      label: 'Actions',
+      className: 'text-right',
+      cellClassName: 'text-right',
+      render: (row) => (
+        <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={() => {
+              setSelectedCrmUser(row);
+              setCrmInspectModalOpen(true);
+            }}
+            title="Inspect CRM Profile"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+          >
+            <Eye className="w-4 h-4 stroke-[2]" />
+          </button>
+          <button
+            onClick={() => handleOpenCrmEdit(row)}
+            title="Edit CRM Staff Member"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+          >
+            <Edit2 className="w-4 h-4 stroke-[2]" />
+          </button>
+          <button
+            onClick={() => {
+              setSelectedCrmUser(row);
+              setCrmDeleteModalOpen(true);
+            }}
+            title="Delete CRM Staff Member"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+          >
+            <Trash2 className="w-4 h-4 stroke-[2]" />
+          </button>
+        </div>
+      )
+    }
+  ];
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
@@ -513,85 +896,196 @@ export function UsersListPage() {
         <div>
           <h1 className="text-2xl sm:text-3xl font-semibold text-slate-900 tracking-tight flex items-center gap-2.5">
             <Users className="w-7 h-7 text-blue-600 stroke-[2]" />
-            <span>Platform User Management</span>
+            <span>User & Staff Management</span>
           </h1>
           <p className="mt-1 text-xs sm:text-sm font-normal text-slate-500">
-            Audit, inspect and manage accounts across all tenant organizations and platform admins.
+            Centrally manage platform administrators, tenant organization owners, and live CRM company staff.
           </p>
         </div>
 
-        <PermissionGuard permission="users.create">
-          <button
-            onClick={() => setCreateModalOpen(true)}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all self-start sm:self-auto"
-          >
-            <Plus className="w-4 h-4 stroke-[2]" />
-            <span>Add User</span>
-          </button>
-        </PermissionGuard>
+        <div className="flex items-center gap-3 self-start sm:self-auto">
+          {activeTab === 'SAAS' ? (
+            <PermissionGuard permission="users.create">
+              <button
+                onClick={() => setCreateModalOpen(true)}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all"
+              >
+                <Plus className="w-4 h-4 stroke-[2]" />
+                <span>Add SaaS User</span>
+              </button>
+            </PermissionGuard>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={fetchCrmData}
+                disabled={crmLoading}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl font-medium text-xs text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 shadow-xs transition-all"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${crmLoading ? 'animate-spin text-indigo-600' : 'text-slate-500'}`} />
+                <span>Sync CRM</span>
+              </button>
+              <button
+                onClick={() => {
+                  setCrmForm({ name: '', email: '', phone: '', password: '', branch_id: '', position_id: '', role: 'SALES_REP' });
+                  setCrmCreateModalOpen(true);
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all"
+              >
+                <Plus className="w-4 h-4 stroke-[2]" />
+                <span>Add CRM Staff Member</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Filter and Search Bar */}
-      <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute inset-y-0 left-0 pl-3.5 my-auto w-4 h-4 text-slate-400 stroke-[2]" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search users by name, email or phone..."
-            className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm font-normal text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 transition-colors"
+      {/* Directory Tab Selector */}
+      <div className="flex border-b border-slate-200 gap-6">
+        <button
+          onClick={() => setActiveTab('SAAS')}
+          className={`pb-3 text-sm font-semibold flex items-center gap-2 border-b-2 transition-all ${
+            activeTab === 'SAAS'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <Shield className="w-4 h-4" />
+          <span>SaaS Platform Users</span>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${activeTab === 'SAAS' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600'}`}>
+            {pagination.total || users.length}
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('CRM')}
+          className={`pb-3 text-sm font-semibold flex items-center gap-2 border-b-2 transition-all ${
+            activeTab === 'CRM'
+              ? 'border-indigo-600 text-indigo-600'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <Network className="w-4 h-4 text-indigo-600" />
+          <span>CRM Company Staff & Users Directory</span>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${activeTab === 'CRM' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-600'}`}>
+            {crmUsers.length || 'Live'}
+          </span>
+        </button>
+      </div>
+
+      {activeTab === 'SAAS' ? (
+        <>
+          {/* Filter and Search Bar for SaaS */}
+          <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+            <div className="relative flex-1 max-w-sm">
+              <Search className="absolute inset-y-0 left-0 pl-3.5 my-auto w-4 h-4 text-slate-400 stroke-[2]" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search users by name, email or phone..."
+                className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm font-normal text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 transition-colors"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              {/* Org Filter */}
+              <select
+                value={orgFilter}
+                onChange={(e) => setOrgFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-medium text-slate-700 focus:outline-none focus:bg-white focus:border-blue-500"
+              >
+                <option value="ALL">All Organizations</option>
+                <option value="PLATFORM">Platform Only (No Org)</option>
+                {organizations.map((o) => (
+                  <option key={o.id} value={o.id}>{o.name}</option>
+                ))}
+              </select>
+
+              {/* Role Filter */}
+              <select
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-bold text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500"
+              >
+                <option value="ALL">All Roles</option>
+                {roles.map((r) => (
+                  <option key={r.id || r.name} value={r.id || r.name}>{r.display_name}</option>
+                ))}
+              </select>
+
+              {/* Status Filter */}
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-bold text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500"
+              >
+                <option value="ALL">All Status</option>
+                <option value="ACTIVE">Active</option>
+                <option value="INACTIVE">Inactive</option>
+              </select>
+            </div>
+          </div>
+
+          {/* SaaS Users Table */}
+          <DataTable
+            columns={columns}
+            data={users}
+            isLoading={isLoading}
+            emptyMessage="No users matching current filters"
+            pagination={pagination}
+            onPageChange={(p) => fetchUsers(p)}
           />
-        </div>
+        </>
+      ) : (
+        <>
+          {/* Filter and Search Bar for CRM */}
+          <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+            <div className="relative flex-1 max-w-sm">
+              <Search className="absolute inset-y-0 left-0 pl-3.5 my-auto w-4 h-4 text-slate-400 stroke-[2]" />
+              <input
+                type="text"
+                value={crmSearch}
+                onChange={(e) => setCrmSearch(e.target.value)}
+                placeholder="Search CRM staff by name, email or phone..."
+                className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm font-normal text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-indigo-500 transition-colors"
+              />
+            </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          {/* Org Filter */}
-          <select
-            value={orgFilter}
-            onChange={(e) => setOrgFilter(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-medium text-slate-700 focus:outline-none focus:bg-white focus:border-blue-500"
-          >
-            <option value="ALL">All Organizations</option>
-            <option value="PLATFORM">Platform Only (No Org)</option>
-            {organizations.map((o) => (
-              <option key={o.id} value={o.id}>{o.name}</option>
-            ))}
-          </select>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {/* Branch Filter */}
+              <select
+                value={crmBranchFilter}
+                onChange={(e) => setCrmBranchFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-medium text-slate-700 focus:outline-none focus:bg-white focus:border-indigo-500"
+              >
+                <option value="ALL">All CRM Branches</option>
+                {crmBranches.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
 
-          {/* Role Filter */}
-          <select
-            value={roleFilter}
-            onChange={(e) => setRoleFilter(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-bold text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500"
-          >
-            <option value="ALL">All Roles</option>
-            {roles.map((r) => (
-              <option key={r.id || r.name} value={r.id || r.name}>{r.display_name}</option>
-            ))}
-          </select>
+              {/* Status Filter */}
+              <select
+                value={crmStatusFilter}
+                onChange={(e) => setCrmStatusFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-bold text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-500"
+              >
+                <option value="ALL">All Status</option>
+                <option value="ACTIVE">Active Only</option>
+                <option value="INACTIVE">Inactive Only</option>
+              </select>
+            </div>
+          </div>
 
-          {/* Status Filter */}
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-bold text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500"
-          >
-            <option value="ALL">All Status</option>
-            <option value="ACTIVE">Active</option>
-            <option value="INACTIVE">Inactive</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Users Table */}
-      <DataTable
-        columns={columns}
-        data={users}
-        isLoading={isLoading}
-        emptyMessage="No users matching current filters"
-        pagination={pagination}
-        onPageChange={(p) => fetchUsers(p)}
-      />
+          {/* CRM Users Table */}
+          <DataTable
+            columns={crmColumns}
+            data={filteredCrmUsers}
+            isLoading={crmLoading}
+            emptyMessage="No CRM company staff members found"
+          />
+        </>
+      )}
 
       {/* CREATE USER MODAL */}
       <Modal
@@ -1096,6 +1590,411 @@ export function UsersListPage() {
         confirmText="Delete Account"
         type="danger"
         isLoading={actionLoading}
+      />
+
+      {/* CREATE CRM USER MODAL */}
+      <Modal
+        isOpen={crmCreateModalOpen}
+        onClose={() => setCrmCreateModalOpen(false)}
+        title="Add CRM Staff Member"
+        subtitle="Provision a team member into NexFlow CRM with assigned branch and position."
+        maxWidth="max-w-lg"
+      >
+        <form onSubmit={handleSaveCrmCreate} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Full Name <span className="text-rose-500">*</span>
+            </label>
+            <input
+              type="text"
+              required
+              value={crmForm.name}
+              onChange={(e) => setCrmForm({ ...crmForm, name: e.target.value })}
+              placeholder="e.g. Ramesh Patel"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 transition-all"
+            />
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-semibold text-slate-700">
+                Work Email <span className="text-rose-500">*</span>
+              </label>
+              {crmStaffEmailVerified ? (
+                <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 flex items-center gap-1">
+                  <CheckCircle className="w-3 h-3 text-emerald-600" />
+                  Verified via OTP
+                </span>
+              ) : (
+                <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+                  OTP Verification Required
+                </span>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                  <Mail className="w-4 h-4" />
+                </div>
+                <input
+                  type="email"
+                  required
+                  disabled={crmStaffEmailVerified}
+                  value={crmForm.email}
+                  onChange={(e) => {
+                    setCrmForm({ ...crmForm, email: e.target.value });
+                    setCrmStaffEmailVerified(false);
+                    setCrmStaffOtpSent(false);
+                    setCrmStaffOtpCode('');
+                  }}
+                  placeholder="e.g. ramesh@nexflowcrm.com"
+                  className={`w-full pl-10 pr-3.5 py-2.5 rounded-xl border text-sm font-semibold transition-all shadow-sm ${
+                    crmStaffEmailVerified
+                      ? 'bg-emerald-50/60 border-emerald-300 text-slate-900 font-bold'
+                      : 'bg-slate-50 border-slate-300 text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-indigo-600'
+                  }`}
+                />
+              </div>
+
+              {!crmStaffEmailVerified ? (
+                <button
+                  type="button"
+                  onClick={handleSendCrmStaffOtp}
+                  disabled={crmStaffOtpLoading || !crmForm.email}
+                  className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black shadow-md shadow-indigo-500/20 transition-all whitespace-nowrap disabled:opacity-50"
+                >
+                  {crmStaffOtpLoading ? 'Sending...' : (crmStaffOtpSent ? 'Resend OTP' : 'Send OTP')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCrmStaffEmailVerified(false);
+                    setCrmStaffOtpSent(false);
+                    setCrmStaffOtpCode('');
+                  }}
+                  className="px-3.5 py-2.5 rounded-xl text-xs font-bold text-slate-600 hover:text-slate-900 border border-slate-200 bg-slate-100 hover:bg-slate-200"
+                >
+                  Change
+                </button>
+              )}
+            </div>
+
+            {/* CRM Staff OTP Code Input Box */}
+            {crmStaffOtpSent && !crmStaffEmailVerified && (
+              <div className="mt-2.5 p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-indigo-900">Enter 6-Digit OTP Code</span>
+                  <span className="text-[11px] text-indigo-600">Sent to {crmForm.email}</span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={crmStaffOtpCode}
+                    onChange={(e) => setCrmStaffOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="123456"
+                    className="flex-1 px-3.5 py-2 rounded-lg bg-white border border-indigo-300 text-center text-sm font-black tracking-widest text-slate-900 focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVerifyCrmStaffOtp}
+                    disabled={crmStaffOtpLoading || crmStaffOtpCode.length < 6}
+                    className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-sm disabled:opacity-50 transition-all"
+                  >
+                    {crmStaffOtpLoading ? 'Verifying...' : 'Verify OTP'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Phone Number (10 Digits)
+              </label>
+              <input
+                type="tel"
+                maxLength={10}
+                value={crmForm.phone}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+                  setCrmForm({ ...crmForm, phone: val });
+                }}
+                placeholder="9876543210"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 transition-all"
+              />
+              {crmForm.phone && crmForm.phone.length !== 10 && (
+                <span className="text-[10px] text-amber-600 font-bold mt-0.5 block">
+                  Must be exactly 10 digits ({crmForm.phone.length}/10)
+                </span>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Temporary Password
+              </label>
+              <input
+                type="password"
+                value={crmForm.password}
+                onChange={(e) => setCrmForm({ ...crmForm, password: e.target.value })}
+                placeholder="Default: Temporary@123"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 transition-all"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Branch Assignment
+              </label>
+              <select
+                value={crmForm.branch_id}
+                onChange={(e) => setCrmForm({ ...crmForm, branch_id: e.target.value })}
+                className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-medium text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-600"
+              >
+                <option value="">-- Choose Branch --</option>
+                {crmBranches.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Designation / Position
+              </label>
+              <select
+                value={crmForm.position_id}
+                onChange={(e) => setCrmForm({ ...crmForm, position_id: e.target.value })}
+                className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-medium text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-600"
+              >
+                <option value="">-- Choose Position --</option>
+                {crmPositions.map((p) => (
+                  <option key={p.id} value={p.id}>{p.title || p.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Role Authority Level
+            </label>
+            <select
+              value={crmForm.role}
+              onChange={(e) => setCrmForm({ ...crmForm, role: e.target.value })}
+              className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-medium text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-600"
+            >
+              <option value="SALES_REP">Sales Representative</option>
+              <option value="SALES_MANAGER">Sales Manager</option>
+              <option value="TEAM_LEAD">Team Lead</option>
+              <option value="ADMIN">CRM Administrator</option>
+            </select>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={() => setCrmCreateModalOpen(false)}
+              className="px-4 py-2 rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={crmActionLoading || !crmStaffEmailVerified}
+              className={`px-5 py-2 rounded-xl text-xs font-semibold shadow-sm transition-all ${
+                crmStaffEmailVerified
+                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer'
+                  : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+              }`}
+            >
+              {crmActionLoading ? 'Creating...' : (crmStaffEmailVerified ? 'Provision CRM Member' : 'Verify Email with OTP to Proceed')}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* EDIT CRM USER MODAL */}
+      <Modal
+        isOpen={crmEditModalOpen}
+        onClose={() => setCrmEditModalOpen(false)}
+        title="Edit CRM Staff Member"
+        subtitle={`Update account profile and hierarchy assignments for ${selectedCrmUser?.name || 'user'}.`}
+        maxWidth="max-w-lg"
+      >
+        <form onSubmit={handleSaveCrmEdit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Full Name
+            </label>
+            <input
+              type="text"
+              required
+              value={crmForm.name}
+              onChange={(e) => setCrmForm({ ...crmForm, name: e.target.value })}
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 transition-all"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Email Address
+            </label>
+            <input
+              type="email"
+              required
+              value={crmForm.email}
+              onChange={(e) => setCrmForm({ ...crmForm, email: e.target.value })}
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 transition-all"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Phone Number (10 Digits)
+            </label>
+            <input
+              type="tel"
+              maxLength={10}
+              value={crmForm.phone}
+              onChange={(e) => {
+                const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+                setCrmForm({ ...crmForm, phone: val });
+              }}
+              placeholder="9876543210"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 transition-all"
+            />
+            {crmForm.phone && crmForm.phone.length !== 10 && (
+              <span className="text-[10px] text-amber-600 font-bold mt-0.5 block">
+                Must be exactly 10 digits ({crmForm.phone.length}/10)
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Branch Location
+              </label>
+              <select
+                value={crmForm.branch_id}
+                onChange={(e) => setCrmForm({ ...crmForm, branch_id: e.target.value })}
+                className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-medium text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-600"
+              >
+                <option value="">-- No Branch --</option>
+                {crmBranches.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Designation / Position
+              </label>
+              <select
+                value={crmForm.position_id}
+                onChange={(e) => setCrmForm({ ...crmForm, position_id: e.target.value })}
+                className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-medium text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-600"
+              >
+                <option value="">-- No Position --</option>
+                {crmPositions.map((p) => (
+                  <option key={p.id} value={p.id}>{p.title || p.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={() => setCrmEditModalOpen(false)}
+              className="px-4 py-2 rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={crmActionLoading}
+              className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition-all disabled:opacity-50"
+            >
+              {crmActionLoading ? 'Saving...' : 'Update Staff Profile'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* INSPECT CRM USER MODAL */}
+      <Modal
+        isOpen={crmInspectModalOpen}
+        onClose={() => setCrmInspectModalOpen(false)}
+        title="CRM Staff Profile & Attributes"
+        subtitle={`Live database record for ${selectedCrmUser?.name || 'staff member'}.`}
+        maxWidth="max-w-md"
+      >
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 p-3.5 bg-indigo-50 border border-indigo-100 rounded-xl">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-white font-bold text-lg shadow-sm">
+              {selectedCrmUser?.name ? selectedCrmUser.name.charAt(0).toUpperCase() : 'U'}
+            </div>
+            <div>
+              <h4 className="font-bold text-slate-900 text-sm">{selectedCrmUser?.name}</h4>
+              <p className="text-xs text-indigo-700 font-medium">{selectedCrmUser?.email}</p>
+              <span className={`inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded text-[10px] font-semibold ${selectedCrmUser?.is_active ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>
+                {selectedCrmUser?.is_active ? 'Active CRM Member' : 'Inactive'}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Phone</span>
+              <span className="font-semibold text-slate-800">{selectedCrmUser?.phone || 'Not recorded'}</span>
+            </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Role</span>
+              <span className="font-semibold text-indigo-700">{selectedCrmUser?.role_title || selectedCrmUser?.designation || selectedCrmUser?.role || 'Staff'}</span>
+            </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Branch ID</span>
+              <span className="font-mono text-[11px] text-slate-700 truncate block">{selectedCrmUser?.branch_id || 'N/A'}</span>
+            </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Created At</span>
+              <span className="font-medium text-slate-700">
+                {selectedCrmUser?.created_at ? new Date(selectedCrmUser.created_at).toLocaleDateString() : 'N/A'}
+              </span>
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-slate-200 text-right">
+            <button
+              type="button"
+              onClick={() => setCrmInspectModalOpen(false)}
+              className="px-4 py-2 rounded-xl bg-slate-900 text-white font-semibold text-xs"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* CONFIRM DELETE CRM USER MODAL */}
+      <ConfirmDialog
+        isOpen={crmDeleteModalOpen}
+        onClose={() => setCrmDeleteModalOpen(false)}
+        onConfirm={handleConfirmDeleteCrmUser}
+        title="Delete CRM Staff Member"
+        message={`Are you sure you want to remove '${selectedCrmUser?.name}' (${selectedCrmUser?.email}) from the CRM? This will unassign all their active leads.`}
+        confirmText="Delete CRM Member"
+        type="danger"
+        isLoading={crmActionLoading}
       />
     </div>
   );

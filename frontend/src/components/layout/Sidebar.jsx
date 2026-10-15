@@ -22,6 +22,7 @@ import {
   Shield,
   Key,
   Settings,
+  Network,
   LogOut
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -37,7 +38,7 @@ const NAV_GROUPS = [
   {
     category: 'TENANTS',
     items: [
-      { path: '/super-admin/organizations', label: 'Organizations', icon: Building2, permission: 'organizations.view' },
+      { path: '/super-admin/organizations', label: 'CRM Companies', icon: Building2, permission: 'organizations.view' },
       { path: '/super-admin/users', label: 'Users', icon: Users, permission: 'users.view' }
     ]
   },
@@ -60,7 +61,8 @@ const NAV_GROUPS = [
       { path: '/super-admin/notifications', label: 'Notifications', icon: Bell, permission: 'notifications.view' },
       { path: '/super-admin/support', label: 'Support', icon: LifeBuoy, permission: 'support.view' },
       { path: '/super-admin/audit-logs', label: 'Audit Logs', icon: ShieldCheck, permission: 'auditLogs.view' },
-      { path: '/super-admin/settings', label: 'Settings', icon: Settings, permission: 'settings.view' }
+      { path: '/super-admin/settings', label: 'Settings', icon: Settings, permission: 'settings.view' },
+      { path: '/super-admin/crm-integration', label: 'CRM Integration', icon: Network, permission: 'settings.view' }
     ]
   },
   {

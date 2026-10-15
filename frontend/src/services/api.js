@@ -29,8 +29,8 @@ export async function request(endpoint, options = {}) {
   try {
     const response = await fetch(url, config);
 
-    // If 401 Unauthorized, redirect to Super Admin login
-    if (response.status === 401) {
+    // If 401 Unauthorized, redirect to Super Admin login (except for external CRM bridge endpoints)
+    if (response.status === 401 && !options.skipAuthRedirect && !cleanEndpoint.startsWith('/crm')) {
       if (!window.location.pathname.includes('/super-admin/login')) {
         localStorage.removeItem('saas_super_admin_token');
         localStorage.removeItem('saas_super_admin_user');

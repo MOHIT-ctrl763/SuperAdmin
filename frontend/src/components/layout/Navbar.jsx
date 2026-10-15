@@ -168,9 +168,9 @@ export function Navbar({ onMenuToggle, onToggleCollapse, isCollapsed }) {
     searchResults.plans.length > 0;
 
   return (
-    <header className="h-16 px-4 sm:px-8 sticky top-0 z-30 flex items-center justify-between bg-white/80 backdrop-blur-md border-b border-slate-200/70">
+    <header className="h-16 px-4 sm:px-8 sticky top-0 z-30 flex items-center justify-between gap-4 bg-white/80 backdrop-blur-md border-b border-slate-200/70">
       {/* Left: Mobile Menu & Desktop Collapse Toggle */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 shrink-0">
         {/* Mobile toggle */}
         <button
           onClick={onMenuToggle}
@@ -196,13 +196,12 @@ export function Navbar({ onMenuToggle, onToggleCollapse, isCollapsed }) {
         </div>
       </div>
 
-      {/* Right Controls */}
-      <div className="flex items-center gap-3">
-        {/* Interactive Global Search Bar */}
-        <div ref={searchContainerRef} className="relative">
+      {/* Center: Interactive Global Search Bar */}
+      <div className="flex-1 flex justify-center max-w-xl mx-2 sm:mx-6">
+        <div ref={searchContainerRef} className="relative w-full max-w-md">
           <form
             onSubmit={handleSearchSubmit}
-            className="flex items-center bg-white border border-slate-300 rounded-xl px-3 py-1.5 shadow-sm text-xs gap-2 w-64 md:w-80 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100 transition-all"
+            className="flex items-center bg-slate-50 hover:bg-white focus-within:bg-white border border-slate-200 hover:border-slate-300 focus-within:border-blue-500 rounded-xl px-3.5 py-1.5 shadow-xs text-xs gap-2.5 w-full focus-within:ring-2 focus-within:ring-blue-100 transition-all"
           >
             {isSearching ? (
               <Loader2 className="w-3.5 h-3.5 text-blue-600 animate-spin shrink-0" />
@@ -235,7 +234,7 @@ export function Navbar({ onMenuToggle, onToggleCollapse, isCollapsed }) {
 
           {/* Search Results Dropdown Panel */}
           {isSearchOpen && searchQuery.trim().length > 0 && (
-            <div className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-white border border-slate-200 shadow-2xl p-3 z-50 animate-fade-in max-h-[28rem] overflow-y-auto">
+            <div className="absolute left-1/2 -translate-x-1/2 mt-2 w-full sm:w-[32rem] rounded-2xl bg-white border border-slate-200 shadow-2xl p-3 z-50 animate-fade-in max-h-[28rem] overflow-y-auto">
               {/* Header */}
               <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
                 <span>Search Results for "{searchQuery}"</span>
@@ -396,7 +395,10 @@ export function Navbar({ onMenuToggle, onToggleCollapse, isCollapsed }) {
             </div>
           )}
         </div>
+      </div>
 
+      {/* Right Controls */}
+      <div className="flex items-center gap-3 shrink-0">
         {/* Open Live Customer CRM Portal in new tab */}
         <a
           href="http://localhost:5173"
@@ -453,8 +455,16 @@ export function Navbar({ onMenuToggle, onToggleCollapse, isCollapsed }) {
           </div>
         )}
 
-        {/* Super Admin User Avatar Chip */}
+        {/* User Avatar Chip */}
         <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+          <div className="hidden sm:flex flex-col text-right">
+            <span className="text-xs font-bold text-slate-800 leading-tight">
+              {user?.name || 'User'}
+            </span>
+            <span className="text-[10px] font-semibold text-blue-600 leading-tight">
+              {user?.isSuperAdmin ? 'Super Admin' : (user?.organizationName || 'Company Admin')}
+            </span>
+          </div>
           <div className="w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold shadow-sm">
             {user?.name ? user.name.charAt(0).toUpperCase() : 'A'}
           </div>

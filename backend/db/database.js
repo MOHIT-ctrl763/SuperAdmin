@@ -225,9 +225,76 @@ async function initSchema() {
     ALTER TABLE saas_subscriptions ADD COLUMN IF NOT EXISTS scheduled_billing_cycle VARCHAR(50);
     ALTER TABLE saas_subscriptions ADD COLUMN IF NOT EXISTS scheduled_change_date TIMESTAMP;
     ALTER TABLE saas_subscriptions ADD COLUMN IF NOT EXISTS grace_period_end TIMESTAMP;
+
+    -- Universal Email OTP Verifications Table
+    CREATE TABLE IF NOT EXISTS saas_email_verifications (
+      id SERIAL PRIMARY KEY,
+      email VARCHAR(255) NOT NULL,
+      otp VARCHAR(10) NOT NULL,
+      purpose VARCHAR(50) DEFAULT 'GENERAL',
+      is_verified BOOLEAN DEFAULT false,
+      verification_token VARCHAR(100),
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_saas_email_verifications_lookup 
+      ON saas_email_verifications (email, otp, is_verified);
+
+    CREATE TABLE IF NOT EXISTS email_verifications (
+      id SERIAL PRIMARY KEY,
+      email VARCHAR(255) NOT NULL,
+      otp VARCHAR(10) NOT NULL,
+      purpose VARCHAR(50) DEFAULT 'GENERAL',
+      is_verified BOOLEAN DEFAULT false,
+      verification_token VARCHAR(100),
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS crm_company_id VARCHAR(100);
+
+    -- CRM Local Ledger Tables (Ensures zero-downtime & proper working of all CRM views)
+    CREATE TABLE IF NOT EXISTS crm_company_users (
+      id VARCHAR(100) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      email VARCHAR(255) NOT NULL,
+      phone VARCHAR(50),
+      role VARCHAR(50) DEFAULT 'SALES_REP',
+      branch_id VARCHAR(100),
+      branch_name VARCHAR(100),
+      position_id VARCHAR(100),
+      position_title VARCHAR(100),
+      company_id VARCHAR(100),
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    ALTER TABLE crm_company_users ADD COLUMN IF NOT EXISTS company_id VARCHAR(100);
+
+    CREATE TABLE IF NOT EXISTS crm_branches (
+      id VARCHAR(100) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      code VARCHAR(50),
+      city VARCHAR(100),
+      state VARCHAR(100),
+      address TEXT,
+      company_id VARCHAR(100),
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    ALTER TABLE crm_branches ADD COLUMN IF NOT EXISTS company_id VARCHAR(100);
+
+    CREATE TABLE IF NOT EXISTS crm_positions (
+      id VARCHAR(100) PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      department VARCHAR(100),
+      level VARCHAR(50),
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   await seedData();
+  await seedCrmLedger();
   const { seedRBAC } = require('../services/rbacService');
   await seedRBAC();
   console.log('✅ PostgreSQL Schema & Seed Data ready in superadmin_db!');
@@ -303,11 +370,7 @@ async function seedData() {
     await query(`
       INSERT INTO saas_subscriptions (organization_id, organization_name, plan_id, plan_name, billing_cycle, amount, status, current_period_end)
       VALUES 
-      (1, 'Solaris Cloud Solutions', 2, 'Pro', 'MONTHLY', 79, 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days'),
-      (2, 'Vanguard Engineering', 1, 'Basic', 'YEARLY', 290, 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '365 days'),
-      (3, 'NexGen Robotics', 2, 'Pro', 'MONTHLY', 79, 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days'),
-      (4, 'Zenith Logistics', 3, 'Enterprise', 'MONTHLY', 199, 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days'),
-      (5, 'Apex Auto Tech', 2, 'Pro', 'MONTHLY', 79, 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days')
+      (10, 'ajay', 1, 'Basic Plan', 'MONTHLY', 29, 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days')
     `);
   }
 
@@ -316,11 +379,7 @@ async function seedData() {
     await query(`
       INSERT INTO saas_invoices (invoice_number, organization_id, organization_name, plan_name, amount, currency, status, billing_period, due_date, paid_at)
       VALUES 
-      ('INV-2026-001', 1, 'Solaris Cloud Solutions', 'Pro', 79, 'USD', 'PAID', 'Oct 2026', CURRENT_TIMESTAMP + INTERVAL '7 days', CURRENT_TIMESTAMP),
-      ('INV-2026-002', 2, 'Vanguard Engineering', 'Basic', 290, 'USD', 'PAID', 'Annual 2026', CURRENT_TIMESTAMP + INTERVAL '7 days', CURRENT_TIMESTAMP),
-      ('INV-2026-003', 3, 'NexGen Robotics', 'Pro', 79, 'USD', 'PAID', 'Oct 2026', CURRENT_TIMESTAMP + INTERVAL '7 days', CURRENT_TIMESTAMP),
-      ('INV-2026-004', 4, 'Zenith Logistics', 'Enterprise', 199, 'USD', 'PAID', 'Oct 2026', CURRENT_TIMESTAMP + INTERVAL '7 days', CURRENT_TIMESTAMP),
-      ('INV-2026-005', 5, 'Apex Auto Tech', 'Pro', 79, 'USD', 'PAID', 'Oct 2026', CURRENT_TIMESTAMP + INTERVAL '7 days', CURRENT_TIMESTAMP)
+      ('INV-10-1385', 10, 'ajay', 'Basic Plan', 29, 'INR', 'PAID', 'Monthly Plan', CURRENT_TIMESTAMP + INTERVAL '7 days', CURRENT_TIMESTAMP)
     `);
   }
 
@@ -329,11 +388,7 @@ async function seedData() {
     await query(`
       INSERT INTO saas_payments (payment_id, organization_id, organization_name, amount, currency, method, status)
       VALUES 
-      ('PAY-00918', 1, 'Solaris Cloud Solutions', 79, 'USD', 'CREDIT_CARD', 'SUCCESS'),
-      ('PAY-00919', 2, 'Vanguard Engineering', 290, 'USD', 'BANK_TRANSFER', 'SUCCESS'),
-      ('PAY-00920', 3, 'NexGen Robotics', 79, 'USD', 'CREDIT_CARD', 'SUCCESS'),
-      ('PAY-00921', 4, 'Zenith Logistics', 199, 'USD', 'STRIPE', 'SUCCESS'),
-      ('PAY-00922', 5, 'Apex Auto Tech', 79, 'USD', 'RAZORPAY', 'SUCCESS')
+      ('TXN-682755', 10, 'ajay', 29, 'INR', 'UPI', 'SUCCESS')
     `);
   }
 
@@ -398,6 +453,50 @@ async function seedData() {
       ('enforce_2fa', 'false', 'Mandatory multi-factor authentication for Super Admin accounts'),
       ('maintenance_mode', 'false', 'Lock platform for scheduled infrastructure maintenance')
     `);
+  }
+}
+
+async function seedCrmLedger() {
+  try {
+    const branchesRes = await query('SELECT COUNT(*) as count FROM crm_branches');
+    if (parseInt(branchesRes.rows[0].count, 10) === 0) {
+      await query(`
+        INSERT INTO crm_branches (id, name, code, city, state, address, is_active)
+        VALUES 
+        ('DEL01', 'Delhi Main Branch', 'DEL01', 'New Delhi', 'Delhi', 'Connaught Place, Central Delhi', true),
+        ('DEL59', 'Delhi MG Road Hub', 'DEL59', 'New Delhi', 'Delhi', 'MG Road Commercial Complex', true),
+        ('MUM01', 'Mumbai HQ Office', 'MUM01', 'Mumbai', 'Maharashtra', 'Andheri East Business District', true),
+        ('PUN01', 'Pune Tech Office', 'PUN01', 'Pune', 'Maharashtra', 'Hinjewadi Phase 1, Pune', true)
+      `);
+    }
+
+    const posRes = await query('SELECT COUNT(*) as count FROM crm_positions');
+    if (parseInt(posRes.rows[0].count, 10) === 0) {
+      await query(`
+        INSERT INTO crm_positions (id, title, department, level, is_active)
+        VALUES 
+        ('POS-01', 'Sales Representative', 'Sales', 'Associate', true),
+        ('POS-02', 'Senior Sales Executive', 'Sales', 'Senior', true),
+        ('POS-03', 'Branch Manager', 'Operations', 'Lead', true),
+        ('POS-04', 'Account Manager', 'Client Relations', 'Mid', true),
+        ('POS-05', 'Customer Support Specialist', 'Customer Support', 'Associate', true)
+      `);
+    }
+
+    const usersRes = await query('SELECT COUNT(*) as count FROM crm_company_users');
+    if (parseInt(usersRes.rows[0].count, 10) === 0) {
+      await query(`
+        INSERT INTO crm_company_users (id, name, email, phone, role, branch_id, branch_name, position_id, position_title, is_active)
+        VALUES 
+        ('e24218c7-7f84-4ff8-b082-f4dace04f181', 'AASIB KHAN', 'aasibkhan155471@gmail.com', '+91 98765 43210', 'SUPER_ADMIN', 'MUM01', 'Mumbai HQ Office', 'POS-03', 'Branch Manager', true),
+        ('c1a2b3c4-1111-4444-8888-000000000001', 'Rohit Varma', 'rohit.v@nexflowcrm.com', '+91 98201 22334', 'SALES_REP', 'DEL01', 'Delhi Main Branch', 'POS-01', 'Sales Representative', true),
+        ('c1a2b3c4-1111-4444-8888-000000000002', 'Ananya Sen', 'ananya.s@nexflowcrm.com', '+91 98202 33445', 'SALES_REP', 'MUM01', 'Mumbai HQ Office', 'POS-02', 'Senior Sales Executive', true),
+        ('c1a2b3c4-1111-4444-8888-000000000003', 'Vikram Rao', 'vikram.r@nexflowcrm.com', '+91 98203 44556', 'MANAGER', 'PUN01', 'Pune Tech Office', 'POS-03', 'Branch Manager', true),
+        ('c1a2b3c4-1111-4444-8888-000000000004', 'Pooja Deshmukh', 'pooja.d@nexflowcrm.com', '+91 98204 55667', 'SUPPORT', 'DEL59', 'Delhi MG Road Hub', 'POS-05', 'Customer Support Specialist', true)
+      `);
+    }
+  } catch (err) {
+    console.error('⚠️ seedCrmLedger notice:', err.message);
   }
 }
 

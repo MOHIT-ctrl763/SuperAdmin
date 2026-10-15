@@ -1,138 +1,109 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { DataTable } from '../../components/common/DataTable';
-import { Badge } from '../../components/common/Badge';
 import { Modal } from '../../components/common/Modal';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import {
   Building2,
   Plus,
   Search,
-  Filter,
-  Eye,
-  Edit2,
-  Ban,
-  CheckCircle,
   Trash2,
-  UserCheck,
   RefreshCw,
-  ExternalLink,
   Layers,
-  Clock,
   Mail,
   KeyRound,
-  CheckCircle2
+  CheckCircle,
+  Lock,
+  Eye,
+  EyeOff,
+  ShieldCheck
 } from 'lucide-react';
 import { PermissionGuard } from '../../components/auth/PermissionGuard';
+import { crmApi } from '../../services/crmApi';
+
+const INDIAN_STATES = [
+  { code: '27', name: 'Maharashtra' },
+  { code: '07', name: 'Delhi' },
+  { code: '24', name: 'Gujarat' },
+  { code: '29', name: 'Karnataka' },
+  { code: '09', name: 'Uttar Pradesh' },
+  { code: '33', name: 'Tamil Nadu' },
+  { code: '08', name: 'Rajasthan' },
+  { code: '06', name: 'Haryana' },
+  { code: '36', name: 'Telangana' },
+  { code: '19', name: 'West Bengal' },
+  { code: '23', name: 'Madhya Pradesh' },
+  { code: '32', name: 'Kerala' },
+  { code: '37', name: 'Andhra Pradesh' },
+  { code: '03', name: 'Punjab' },
+  { code: '10', name: 'Bihar' },
+  { code: '21', name: 'Odisha' },
+  { code: '18', name: 'Assam' },
+  { code: '20', name: 'Jharkhand' },
+  { code: '22', name: 'Chhattisgarh' },
+  { code: '05', name: 'Uttarakhand' },
+  { code: '30', name: 'Goa' },
+  { code: '02', name: 'Himachal Pradesh' },
+  { code: '04', name: 'Chandigarh' },
+  { code: '01', name: 'Jammu & Kashmir' },
+];
 
 export function OrganizationsListPage() {
-  const [organizations, setOrganizations] = useState([]);
   const [plans, setPlans] = useState([]);
-  const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('ALL');
-  const [isLoading, setIsLoading] = useState(true);
 
-  // Modals state
-  const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [suspendModalOpen, setSuspendModalOpen] = useState(false);
-  const [selectedOrg, setSelectedOrg] = useState(null);
-  const [suspensionReason, setSuspensionReason] = useState('');
-  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
-  const [actionLoading, setActionLoading] = useState(false);
+  // CRM Companies state
+  const [crmCompanies, setCrmCompanies] = useState([]);
+  const [crmLoading, setCrmLoading] = useState(false);
+  const [crmSearch, setCrmSearch] = useState('');
 
-  // Email OTP verification state for organization provisioning
-  const [orgEmailVerified, setOrgEmailVerified] = useState(false);
-  const [orgOtpSent, setOrgOtpSent] = useState(false);
-  const [orgOtpCode, setOrgOtpCode] = useState('');
-  const [orgOtpLoading, setOrgOtpLoading] = useState(false);
+  // Password management modal for CRM company
+  const [resetPasswordModalOpen, setResetPasswordModalOpen] = useState(false);
+  const [selectedCompanyForPassword, setSelectedCompanyForPassword] = useState(null);
+  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [showNewAdminPassword, setShowNewAdminPassword] = useState(false);
+  const [resetPasswordLoading, setResetPasswordLoading] = useState(false);
 
-  // New Organization Form state
-  const [newOrgForm, setNewOrgForm] = useState({
+  // Delete CRM Company state
+  const [confirmCrmDeleteOpen, setConfirmCrmDeleteOpen] = useState(false);
+  const [selectedCrmCompanyToDelete, setSelectedCrmCompanyToDelete] = useState(null);
+
+  // Create CRM Company Modal
+  const [createCrmCompanyModalOpen, setCreateCrmCompanyModalOpen] = useState(false);
+  const [showCrmPassword, setShowCrmPassword] = useState(false);
+  const [newCrmCompanyForm, setNewCrmCompanyForm] = useState({
     name: '',
-    slug: '',
     email: '',
+    password: '',
+    planId: 2,
     phone: '',
-    city: '',
-    state: '',
-    status: 'TRIAL',
-    trialDays: 14,
-    ownerName: '',
-    ownerEmail: '',
-    ownerPassword: '',
-    planId: 2
+    address: '',
+    state: 'Maharashtra',
+    stateCode: '27',
+    financialYearStart: '2026-04-01',
+    gstin: '',
+    pan: '',
+    website: ''
   });
+  const [crmActionLoading, setCrmActionLoading] = useState(false);
+
+  // Email OTP verification state for CRM Company creation
+  const [crmCompanyEmailVerified, setCrmCompanyEmailVerified] = useState(false);
+  const [crmCompanyOtpSent, setCrmCompanyOtpSent] = useState(false);
+  const [crmCompanyOtpCode, setCrmCompanyOtpCode] = useState('');
+  const [crmCompanyOtpLoading, setCrmCompanyOtpLoading] = useState(false);
 
   const toast = useToast();
-  const navigate = useNavigate();
-
-  const getTargetOrgEmail = () => {
-    return (newOrgForm.ownerEmail || newOrgForm.email || '').trim();
-  };
-
-  const handleSendOrgOtp = async () => {
-    const targetEmail = getTargetOrgEmail();
-    if (!targetEmail || !targetEmail.includes('@')) {
-      toast.error('Please enter a valid owner or billing email first.');
-      return;
-    }
-    setOrgOtpLoading(true);
-    try {
-      const res = await api.post('/auth/send-email-otp', {
-        email: targetEmail,
-        purpose: 'NEW_ORG',
-        name: newOrgForm.ownerName || newOrgForm.name || 'Tenant Admin'
-      });
-      if (res.success) {
-        setOrgOtpSent(true);
-        setOrgOtpCode(''); // Never autofill; user must enter from their email inbox
-        toast.success(res.message || 'Verification OTP sent to email inbox. Please check your email.');
-      }
-    } catch (err) {
-      toast.error(err.message || 'Failed to send verification code.');
-    } finally {
-      setOrgOtpLoading(false);
-    }
-  };
-
-  const handleVerifyOrgOtp = async () => {
-    const targetEmail = getTargetOrgEmail();
-    if (!orgOtpCode || orgOtpCode.length < 6) {
-      toast.error('Please enter the 6-digit verification code.');
-      return;
-    }
-    setOrgOtpLoading(true);
-    try {
-      const res = await api.post('/auth/verify-email-otp', {
-        email: targetEmail,
-        otp: orgOtpCode,
-        purpose: 'NEW_ORG'
-      });
-      if (res.success) {
-        setOrgEmailVerified(true);
-        toast.success('Organization email verified with OTP!');
-      }
-    } catch (err) {
-      toast.error(err.message || 'Invalid or expired verification code.');
-    } finally {
-      setOrgOtpLoading(false);
-    }
-  };
 
   const fetchPlans = async () => {
     try {
       const res = await api.get('/plans');
       if (res.success && Array.isArray(res.data) && res.data.length > 0) {
         setPlans(res.data);
-        setNewOrgForm(prev => {
+        const defaultPlan = res.data.find(p => p.is_popular) || res.data[0];
+        setNewCrmCompanyForm(prev => {
           const exists = res.data.some(p => p.id === prev.planId);
-          if (!exists) {
-            const defaultPlan = res.data.find(p => p.is_popular) || res.data[0];
-            return { ...prev, planId: defaultPlan.id };
-          }
-          return prev;
+          return exists ? prev : { ...prev, planId: defaultPlan.id };
         });
       }
     } catch (err) {
@@ -140,266 +111,277 @@ export function OrganizationsListPage() {
     }
   };
 
-  const fetchOrganizations = async (page = 1) => {
-    setIsLoading(true);
+  const fetchCrmCompanies = async () => {
+    setCrmLoading(true);
     try {
-      const res = await api.get('/organizations', {
-        page,
-        limit: 10,
-        search,
-        status: statusFilter
-      });
+      const res = await crmApi.getCompanies();
       if (res.success && res.data) {
-        setOrganizations(res.data.items);
-        setPagination(res.data.pagination);
+        const list = Array.isArray(res.data) ? res.data : (res.data.items || res.data.companies || []);
+        setCrmCompanies(list);
       }
     } catch (err) {
-      toast.error('Failed to load organizations: ' + err.message);
+      console.error('Failed to load CRM companies', err);
     } finally {
-      setIsLoading(false);
+      setCrmLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchOrganizations(1);
+    fetchCrmCompanies();
     fetchPlans();
-  }, [search, statusFilter]);
+  }, []);
 
-  const handleOpenCreateModal = () => {
-    fetchPlans();
-    setCreateModalOpen(true);
-  };
-
-  const handleCreateOrg = async (e) => {
-    e.preventDefault();
-    if (!orgEmailVerified) {
-      toast.error('Please verify the organization contact/owner email with OTP before provisioning.');
+  const handleSendCrmCompanyOtp = async () => {
+    if (!newCrmCompanyForm.email || !newCrmCompanyForm.email.includes('@')) {
+      toast.error('Please enter a valid company contact email first.');
       return;
     }
-    if (newOrgForm.phone && newOrgForm.phone.length !== 10) {
-      toast.error('Contact phone number must be exactly 10 digits.');
-      return;
-    }
-    setActionLoading(true);
+    setCrmCompanyOtpLoading(true);
     try {
-      const res = await api.post('/organizations', newOrgForm);
-      if (res.success) {
-        toast.success(`Organization '${res.data.name}' created successfully.`);
-        setCreateModalOpen(false);
-        setOrgEmailVerified(false);
-        setOrgOtpSent(false);
-        setOrgOtpCode('');
-        setNewOrgForm({
-          name: '',
-          slug: '',
-          email: '',
-          phone: '',
-          city: '',
-          state: '',
-          status: 'TRIAL',
-          trialDays: 14,
-          ownerName: '',
-          ownerEmail: '',
-          ownerPassword: '',
-          planId: plans.find(p => p.is_popular)?.id || (plans[0]?.id || 2)
-        });
-        fetchOrganizations(1);
-      }
-    } catch (err) {
-      toast.error(err.message || 'Failed to create organization');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleSuspend = async () => {
-    if (!selectedOrg) return;
-    setActionLoading(true);
-    try {
-      const res = await api.post(`/organizations/${selectedOrg.id}/suspend`, {
-        reason: suspensionReason || 'Administrative suspension'
+      const res = await api.post('/auth/send-email-otp', {
+        email: newCrmCompanyForm.email,
+        purpose: 'CRM_COMPANY',
+        name: newCrmCompanyForm.name || 'CRM Company'
       });
       if (res.success) {
-        toast.success(`Organization '${selectedOrg.name}' suspended.`);
-        setSuspendModalOpen(false);
-        setSelectedOrg(null);
-        setSuspensionReason('');
-        fetchOrganizations(pagination.page);
+        setCrmCompanyOtpSent(true);
+        if (res.data?.otp) {
+          setCrmCompanyOtpCode(res.data.otp);
+        }
+        toast.success(res.message || 'Verification OTP sent to company contact email.');
       }
     } catch (err) {
-      toast.error(err.message || 'Failed to suspend organization');
+      toast.error(err.message || 'Failed to send verification code.');
     } finally {
-      setActionLoading(false);
+      setCrmCompanyOtpLoading(false);
     }
   };
 
-  const handleActivate = async (org) => {
-    setActionLoading(true);
+  const handleVerifyCrmCompanyOtp = async () => {
+    if (!crmCompanyOtpCode || crmCompanyOtpCode.length < 6) {
+      toast.error('Please enter the 6-digit verification code.');
+      return;
+    }
+    setCrmCompanyOtpLoading(true);
     try {
-      const res = await api.post(`/organizations/${org.id}/activate`);
+      const res = await api.post('/auth/verify-email-otp', {
+        email: newCrmCompanyForm.email,
+        otp: crmCompanyOtpCode,
+        purpose: 'CRM_COMPANY'
+      });
       if (res.success) {
-        toast.success(`Organization '${org.name}' reactivated successfully.`);
-        fetchOrganizations(pagination.page);
+        setCrmCompanyEmailVerified(true);
+        toast.success('Company contact email successfully verified with OTP!');
       }
     } catch (err) {
-      toast.error(err.message || 'Failed to activate organization');
+      toast.error(err.message || 'Invalid or expired verification code.');
     } finally {
-      setActionLoading(false);
+      setCrmCompanyOtpLoading(false);
     }
   };
 
-  const handleDelete = async () => {
-    if (!selectedOrg) return;
-    setActionLoading(true);
+  const handleResetPasswordSubmit = async (e) => {
+    e.preventDefault();
+    if (!selectedCompanyForPassword) return;
+    if (!newAdminPassword || newAdminPassword.trim().length < 6) {
+      toast.error('Password must be at least 6 characters long.');
+      return;
+    }
+    setResetPasswordLoading(true);
     try {
-      const res = await api.delete(`/organizations/${selectedOrg.id}`);
+      const res = await crmApi.resetCompanyPassword(selectedCompanyForPassword.id, {
+        password: newAdminPassword.trim()
+      });
       if (res.success) {
-        toast.success(`Organization '${selectedOrg.name}' deleted.`);
-        setConfirmDeleteOpen(false);
-        setSelectedOrg(null);
-        fetchOrganizations(1);
+        toast.success(res.message || 'Password updated and synced to NexFlow CRM!');
+        setResetPasswordModalOpen(false);
+        setNewAdminPassword('');
+        setSelectedCompanyForPassword(null);
+        fetchCrmCompanies();
+      } else {
+        toast.error(res.message || 'Failed to update password');
       }
     } catch (err) {
-      toast.error(err.message || 'Failed to delete organization');
+      toast.error(err.message || 'Error updating password');
     } finally {
-      setActionLoading(false);
+      setResetPasswordLoading(false);
     }
   };
 
-  const handleLoginAsAdmin = async (org) => {
-    setActionLoading(true);
+  const handleDeleteCrmCompany = async () => {
+    if (!selectedCrmCompanyToDelete) return;
+    setCrmActionLoading(true);
     try {
-      const res = await api.post('/auth/impersonate', { organizationId: org.id });
-      if (res.success && res.data?.token) {
-        toast.success(`Authenticated as Admin for ${org.name}`);
-        // Store impersonation token in localStorage for CRM portal and open
-        const crmUrl = `http://localhost:5173/dashboard?impersonate_token=${res.data.token}`;
-        window.open(crmUrl, '_blank');
+      const res = await api.delete(`/crm/companies/${selectedCrmCompanyToDelete.id}`);
+      if (res.success) {
+        toast.success(`CRM Company '${selectedCrmCompanyToDelete.name}' deleted.`);
+        setConfirmCrmDeleteOpen(false);
+        setSelectedCrmCompanyToDelete(null);
+        fetchCrmCompanies();
+      } else {
+        toast.error(res.message || 'Failed to delete company');
       }
     } catch (err) {
-      toast.error(err.message || 'Impersonation failed');
+      toast.error(err.message || 'Error deleting company');
     } finally {
-      setActionLoading(false);
+      setCrmActionLoading(false);
     }
   };
 
-  const columns = [
+  const handleCreateCrmCompany = async (e) => {
+    e.preventDefault();
+    if (!newCrmCompanyForm.name?.trim()) {
+      toast.error('Please enter Company Name');
+      return;
+    }
+    if (newCrmCompanyForm.email && !crmCompanyEmailVerified) {
+      toast.error('Please verify company contact email with OTP before provisioning.');
+      return;
+    }
+    if (!newCrmCompanyForm.password || newCrmCompanyForm.password.trim().length < 6) {
+      toast.error('Please set a Company Admin Password of at least 6 characters.');
+      return;
+    }
+    if (newCrmCompanyForm.phone && newCrmCompanyForm.phone.length !== 10) {
+      toast.error('Company contact phone number must be exactly 10 digits.');
+      return;
+    }
+    if (!newCrmCompanyForm.stateCode) {
+      toast.error('Please select State');
+      return;
+    }
+    if (!newCrmCompanyForm.financialYearStart) {
+      toast.error('Please select Financial Year Start');
+      return;
+    }
+    setCrmActionLoading(true);
+    try {
+      const res = await crmApi.createCompany(newCrmCompanyForm);
+      if (res.success) {
+        toast.success(`CRM Company '${newCrmCompanyForm.name}' created! Login access configured.`);
+        setCreateCrmCompanyModalOpen(false);
+        setNewCrmCompanyForm({
+          name: '',
+          email: '',
+          password: '',
+          planId: plans.find(p => p.is_popular)?.id || (plans[0]?.id || 2),
+          phone: '',
+          address: '',
+          state: 'Maharashtra',
+          stateCode: '27',
+          financialYearStart: '2026-04-01',
+          gstin: '',
+          pan: '',
+          website: ''
+        });
+        setCrmCompanyEmailVerified(false);
+        setCrmCompanyOtpSent(false);
+        setCrmCompanyOtpCode('');
+        fetchCrmCompanies();
+      } else {
+        toast.error(res.message || 'Failed to create CRM company');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Error creating CRM company');
+    } finally {
+      setCrmActionLoading(false);
+    }
+  };
+
+  const filteredCrmCompanies = crmCompanies.filter((c) => {
+    const q = crmSearch.toLowerCase().trim();
+    if (!q) return true;
+    return (
+      (c.name && c.name.toLowerCase().includes(q)) ||
+      (c.email && c.email.toLowerCase().includes(q)) ||
+      (c.phone && c.phone.includes(q)) ||
+      (c.domain && c.domain.toLowerCase().includes(q))
+    );
+  });
+
+  const crmColumns = [
     {
       key: 'name',
-      label: 'Company',
+      label: 'CRM Company',
       render: (row) => (
-        <div className="flex flex-col">
-          <Link
-            to={`/super-admin/organizations/${row.id}`}
-            className="font-medium text-slate-900 text-sm hover:text-blue-600 transition-colors"
-          >
-            {row.name}
-          </Link>
-          <span className="text-xs text-slate-500 font-normal font-mono mt-0.5">slug: {row.slug}</span>
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-white font-bold text-sm shadow-xs">
+            {row.name ? row.name.charAt(0).toUpperCase() : 'C'}
+          </div>
+          <div>
+            <span className="font-semibold text-slate-900 text-sm block">{row.name}</span>
+            <span className="text-xs text-slate-500 font-mono font-normal">UUID: {row.id}</span>
+          </div>
         </div>
       )
     },
     {
-      key: 'owner_name',
-      label: 'Owner / Contact',
+      key: 'contact',
+      label: 'Contact Info',
       render: (row) => (
-        <div className="flex flex-col">
-          <span className="text-slate-900 font-medium text-sm">{row.owner_name || 'Admin'}</span>
-          <span className="text-xs text-slate-500 font-normal">{row.email}</span>
+        <div className="flex flex-col text-xs">
+          <span className="text-slate-800 font-medium">{row.email || 'No email registered'}</span>
+          <span className="text-slate-500">{row.phone || 'No phone recorded'}</span>
         </div>
       )
     },
     {
-      key: 'plan_name',
-      label: 'Plan',
+      key: 'plan',
+      label: 'Sold Subscription Plan',
       render: (row) => (
-        <Badge variant={row.plan_name || 'PRO'}>{row.plan_name || 'Pro'}</Badge>
-      )
-    },
-    {
-      key: 'users_count',
-      label: 'Users',
-      render: (row) => (
-        <span className="font-medium text-slate-900 text-sm">
-          {row.users_count} <span className="text-slate-500 font-normal text-xs">users</span>
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+          <Layers className="w-3.5 h-3.5 text-indigo-500" />
+          <span>{row.plan_name || 'Standard'}</span>
         </span>
       )
     },
     {
       key: 'status',
       label: 'Status',
-      render: (row) => <Badge variant={row.status}>{row.status}</Badge>
+      render: (row) => (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+          <span>{row.status || 'ACTIVE'}</span>
+        </span>
+      )
     },
     {
       key: 'created_at',
-      label: 'Created',
+      label: 'Registered',
       render: (row) => (
-        <span className="text-xs text-slate-600 font-normal">
-          {new Date(row.created_at).toLocaleDateString()}
+        <span className="text-xs text-slate-500 font-normal">
+          {row.created_at ? new Date(row.created_at).toLocaleDateString() : 'N/A'}
         </span>
       )
     },
     {
       key: 'actions',
       label: 'Actions',
-      className: 'text-right',
-      cellClassName: 'text-right',
+      align: 'right',
       render: (row) => (
-        <div className="flex items-center justify-end gap-1.5">
-          {/* View Details */}
-          <Link
-            to={`/super-admin/organizations/${row.id}`}
-            title="View Details"
-            className="p-1.5 rounded-lg text-slate-700 hover:text-blue-700 hover:bg-blue-50 transition-colors border border-slate-200 bg-white shadow-xs"
-          >
-            <Eye className="w-4 h-4 stroke-[2.5]" />
-          </Link>
-
-          {/* Login as Admin */}
+        <div className="flex items-center justify-end gap-2">
           <button
-            onClick={() => handleLoginAsAdmin(row)}
-            title="Login as Organization Admin"
-            disabled={actionLoading}
-            className="p-1.5 rounded-lg text-blue-600 hover:text-blue-700 hover:bg-blue-50 transition-colors border border-blue-200 bg-blue-50/50 shadow-xs"
+            onClick={() => {
+              setSelectedCompanyForPassword(row);
+              setNewAdminPassword('');
+              setResetPasswordModalOpen(true);
+            }}
+            title="Set / Reset CRM Login Password"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition-colors cursor-pointer"
           >
-            <UserCheck className="w-4 h-4 stroke-[2.5]" />
+            <KeyRound className="w-3.5 h-3.5 text-indigo-600" />
+            <span>CRM Password</span>
           </button>
-
-          {/* Suspend or Activate */}
-          <PermissionGuard permission="organizations.suspend">
-            {row.status === 'SUSPENDED' ? (
-              <button
-                onClick={() => handleActivate(row)}
-                title="Activate Organization"
-                className="p-1.5 rounded-lg text-emerald-700 hover:text-emerald-800 hover:bg-emerald-100 transition-colors border border-emerald-300 bg-emerald-50 shadow-xs"
-              >
-                <CheckCircle className="w-4 h-4 stroke-[2.5]" />
-              </button>
-            ) : (
-              <button
-                onClick={() => {
-                  setSelectedOrg(row);
-                  setSuspendModalOpen(true);
-                }}
-                title="Suspend Organization"
-                className="p-1.5 rounded-lg text-amber-700 hover:text-amber-800 hover:bg-amber-100 transition-colors border border-amber-300 bg-amber-50 shadow-xs"
-              >
-                <Ban className="w-4 h-4 stroke-[2.5]" />
-              </button>
-            )}
-          </PermissionGuard>
-
-          {/* Delete */}
           <PermissionGuard permission="organizations.delete">
             <button
               onClick={() => {
-                setSelectedOrg(row);
-                setConfirmDeleteOpen(true);
+                setSelectedCrmCompanyToDelete(row);
+                setConfirmCrmDeleteOpen(true);
               }}
-              title="Delete Organization"
-              className="p-1.5 rounded-lg text-rose-600 hover:text-rose-700 hover:bg-rose-100 transition-colors border border-rose-200 bg-rose-50 shadow-xs"
+              title="Delete CRM Company"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
             >
-              <Trash2 className="w-4 h-4 stroke-[2.5]" />
+              <Trash2 className="w-4 h-4 stroke-[2]" />
             </button>
           </PermissionGuard>
         </div>
@@ -413,397 +395,482 @@ export function OrganizationsListPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-semibold text-slate-900 tracking-tight flex items-center gap-2.5">
-            <Building2 className="w-7 h-7 text-blue-600 stroke-[2]" />
-            <span>Organization Management</span>
+            <Building2 className="w-7 h-7 text-indigo-600 stroke-[2]" />
+            <span>CRM Companies & Workspaces</span>
           </h1>
           <p className="mt-1 text-xs sm:text-sm text-slate-500 font-normal">
-            Control customer tenants, subscription states, suspension policies and tenant isolation.
+            Client companies using NexFlow CRM, assigned subscription plans, and login access management.
           </p>
         </div>
 
-        <PermissionGuard permission="organizations.create">
+        <div className="flex items-center gap-2.5 self-start sm:self-auto">
           <button
-            onClick={handleOpenCreateModal}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all self-start sm:self-auto"
+            onClick={fetchCrmCompanies}
+            disabled={crmLoading}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl font-medium text-xs text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 shadow-xs transition-all cursor-pointer"
           >
-            <Plus className="w-4 h-4 stroke-[2]" />
-            <span>New Organization</span>
+            <RefreshCw className={`w-3.5 h-3.5 ${crmLoading ? 'animate-spin text-indigo-600' : 'text-slate-500'}`} />
+            <span>Refresh</span>
           </button>
-        </PermissionGuard>
+          <PermissionGuard permission="organizations.create">
+            <button
+              onClick={() => {
+                fetchPlans();
+                setCreateCrmCompanyModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all cursor-pointer"
+            >
+              <Plus className="w-4 h-4 stroke-[2]" />
+              <span>New CRM Company</span>
+            </button>
+          </PermissionGuard>
+        </div>
       </div>
 
-      {/* Filter and Search Bar */}
+      {/* CRM Search & Filter Bar */}
       <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 p-4 rounded-2xl bg-white border border-slate-200/90 shadow-sm">
         <div className="relative flex-1 max-w-md">
           <Search className="absolute inset-y-0 left-0 pl-3.5 my-auto w-4 h-4 text-slate-400 stroke-[2]" />
           <input
             type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by company name, owner or email..."
-            className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm font-normal text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 transition-colors"
+            value={crmSearch}
+            onChange={(e) => setCrmSearch(e.target.value)}
+            placeholder="Search CRM companies by name, email, phone or plan..."
+            className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm font-normal text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-indigo-500 transition-colors"
           />
         </div>
-
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1">
-            <Filter className="w-3.5 h-3.5 stroke-[2]" /> Status:
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200">
+            Total Companies: <strong className="text-indigo-700 font-bold">{filteredCrmCompanies.length}</strong>
           </span>
-          {['ALL', 'ACTIVE', 'TRIAL', 'SUSPENDED', 'EXPIRED', 'CANCELLED'].map((st) => (
-            <button
-              key={st}
-              onClick={() => setStatusFilter(st)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
-                statusFilter === st
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'bg-slate-100 text-slate-700 hover:text-slate-900 hover:bg-slate-200'
-              }`}
-            >
-              {st}
-            </button>
-          ))}
         </div>
       </div>
 
-      {/* Table */}
+      {/* CRM Companies Table */}
       <DataTable
-        columns={columns}
-        data={organizations}
-        isLoading={isLoading}
-        emptyMessage="No organizations matching the filter criteria"
-        pagination={pagination}
-        onPageChange={(p) => fetchOrganizations(p)}
+        columns={crmColumns}
+        data={filteredCrmCompanies}
+        isLoading={crmLoading}
+        emptyMessage="No CRM companies registered yet. Click 'New CRM Company' to provision a company."
       />
 
-      {/* CREATE ORGANIZATION MODAL */}
+      {/* CREATE CRM COMPANY MODAL */}
       <Modal
-        isOpen={createModalOpen}
-        onClose={() => setCreateModalOpen(false)}
-        title="Register New Organization"
-        subtitle="Provision a fresh multi-tenant company with owner account and initial trial plan."
-        maxWidth="max-w-2xl"
+        isOpen={createCrmCompanyModalOpen}
+        onClose={() => setCreateCrmCompanyModalOpen(false)}
+        title="Create New CRM Company"
+        subtitle="Provision a company workspace directly into NexFlow CRM."
+        maxWidth="max-w-lg"
       >
-        <form onSubmit={handleCreateOrg} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Company Name *</label>
-              <input
-                type="text"
-                required
-                value={newOrgForm.name}
-                onChange={(e) => setNewOrgForm({ ...newOrgForm, name: e.target.value })}
-                placeholder="e.g. Acme Corporation"
-                className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Slug / Identifier</label>
-              <input
-                type="text"
-                value={newOrgForm.slug}
-                onChange={(e) => setNewOrgForm({ ...newOrgForm, slug: e.target.value })}
-                placeholder="acme-corp (auto-generated if empty)"
-                className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
-              />
-            </div>
+        <form onSubmit={handleCreateCrmCompany} className="space-y-3.5">
+          <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-100 flex items-start gap-2.5">
+            <Layers className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+            <p className="text-xs text-indigo-900 font-medium leading-relaxed">
+              Company Name, Indian State, and Financial Year Start are mandatory parameters for the live NexFlow CRM tenant workspace.
+            </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Billing Email *</label>
-              <input
-                type="email"
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Company Name <span className="text-rose-500">*</span>
+            </label>
+            <input
+              type="text"
+              required
+              value={newCrmCompanyForm.name}
+              onChange={(e) => setNewCrmCompanyForm({ ...newCrmCompanyForm, name: e.target.value })}
+              placeholder="e.g. Reliance Retail / Digi Solutions"
+              className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600"
+            />
+          </div>
+
+          {/* Plan Sold to Company */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Subscription Plan (Sold to Company) <span className="text-rose-500">*</span>
+            </label>
+            <div className="relative">
+              <select
                 required
-                value={newOrgForm.email}
-                onChange={(e) => setNewOrgForm({ ...newOrgForm, email: e.target.value })}
-                placeholder="billing@acme.com"
-                className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
-              />
+                value={newCrmCompanyForm.planId}
+                onChange={(e) => setNewCrmCompanyForm({ ...newCrmCompanyForm, planId: parseInt(e.target.value) })}
+                className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 appearance-none cursor-pointer"
+              >
+                {plans && plans.length > 0 ? (
+                  plans.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} — ₹{parseFloat(p.price_monthly || p.price || 0).toLocaleString()}/mo • Up to {p.max_users || 'Unlimited'} Users
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    <option value={1}>Starter Plan — ₹29/mo (5 Users)</option>
+                    <option value={2}>Pro Business Plan — ₹79/mo (25 Users)</option>
+                    <option value={3}>Enterprise Tier — ₹199/mo (Unlimited Users)</option>
+                  </>
+                )}
+              </select>
+              <div className="absolute inset-y-0 right-0 pr-3.5 flex items-center pointer-events-none text-slate-400">
+                <Layers className="w-4 h-4 text-indigo-500" />
+              </div>
             </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Select which plan is being sold to this company. This assigns their CRM quotas, user limits, and features.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Contact Phone (10 Digits)</label>
-              <input
-                type="tel"
-                maxLength={10}
-                value={newOrgForm.phone}
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                State & State Code <span className="text-rose-500">*</span>
+              </label>
+              <select
+                required
+                value={newCrmCompanyForm.stateCode}
                 onChange={(e) => {
-                  const val = e.target.value.replace(/\D/g, '').slice(0, 10);
-                  setNewOrgForm({ ...newOrgForm, phone: val });
+                  const selected = INDIAN_STATES.find(s => s.code === e.target.value);
+                  setNewCrmCompanyForm({
+                    ...newCrmCompanyForm,
+                    stateCode: e.target.value,
+                    state: selected ? selected.name : ''
+                  });
                 }}
-                placeholder="9876543210"
-                className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
+                className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600"
+              >
+                {INDIAN_STATES.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.name} ({s.code})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Financial Year Start <span className="text-rose-500">*</span>
+              </label>
+              <input
+                type="date"
+                required
+                value={newCrmCompanyForm.financialYearStart}
+                onChange={(e) => setNewCrmCompanyForm({ ...newCrmCompanyForm, financialYearStart: e.target.value })}
+                className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600"
               />
-              {newOrgForm.phone && newOrgForm.phone.length !== 10 && (
-                <span className="text-[10px] text-amber-600 font-medium mt-0.5 block">
-                  Must be exactly 10 digits ({newOrgForm.phone.length}/10)
-                </span>
-              )}
             </div>
           </div>
 
-          {/* Owner Account */}
-          <div className="pt-3 border-t border-slate-200">
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-blue-600">Owner Admin Credentials</h4>
-              {orgEmailVerified ? (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  Owner Email Verified via OTP
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-semibold text-slate-700">
+                Company Contact Email <span className="text-rose-500">*</span>
+              </label>
+              {crmCompanyEmailVerified ? (
+                <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 flex items-center gap-1">
+                  <CheckCircle className="w-3 h-3 text-emerald-600" />
+                  Verified via OTP
                 </span>
               ) : (
-                <span className="text-[11px] font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+                <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
                   OTP Verification Required
                 </span>
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Owner Name</label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                  <Mail className="w-3.5 h-3.5" />
+                </div>
                 <input
-                  type="text"
-                  value={newOrgForm.ownerName}
-                  onChange={(e) => setNewOrgForm({ ...newOrgForm, ownerName: e.target.value })}
-                  placeholder="John Doe"
-                  className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
+                  type="email"
+                  required
+                  disabled={crmCompanyEmailVerified}
+                  value={newCrmCompanyForm.email}
+                  onChange={(e) => {
+                    setNewCrmCompanyForm({ ...newCrmCompanyForm, email: e.target.value });
+                    setCrmCompanyEmailVerified(false);
+                    setCrmCompanyOtpSent(false);
+                    setCrmCompanyOtpCode('');
+                  }}
+                  placeholder="e.g. contact@digisolutions.com"
+                  className={`w-full pl-9 pr-3.5 py-2 rounded-xl border text-xs font-semibold transition-all ${
+                    crmCompanyEmailVerified
+                      ? 'bg-emerald-50/60 border-emerald-300 text-slate-900 font-bold'
+                      : 'bg-slate-50 border-slate-300 text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600'
+                  }`}
                 />
               </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Password</label>
-                <input
-                  type="password"
-                  value={newOrgForm.ownerPassword}
-                  onChange={(e) => setNewOrgForm({ ...newOrgForm, ownerPassword: e.target.value })}
-                  placeholder="••••••••"
-                  className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
-                />
-              </div>
+
+              {!crmCompanyEmailVerified ? (
+                <button
+                  type="button"
+                  onClick={handleSendCrmCompanyOtp}
+                  disabled={crmCompanyOtpLoading || !newCrmCompanyForm.email}
+                  className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                >
+                  {crmCompanyOtpLoading ? 'Sending...' : (crmCompanyOtpSent ? 'Resend' : 'Send OTP')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCrmCompanyEmailVerified(false);
+                    setCrmCompanyOtpSent(false);
+                    setCrmCompanyOtpCode('');
+                  }}
+                  className="px-3 py-2 rounded-xl text-xs font-semibold text-slate-600 border border-slate-200 bg-slate-100 hover:bg-slate-200 cursor-pointer"
+                >
+                  Change
+                </button>
+              )}
             </div>
 
-            {/* Owner Email with OTP Verification Row */}
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Owner Admin Email *</label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
-                    <Mail className="w-4 h-4" />
-                  </div>
+            {/* OTP Code Box */}
+            {crmCompanyOtpSent && !crmCompanyEmailVerified && (
+              <div className="mt-2.5 p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-indigo-900">Enter 6-Digit OTP</span>
+                  <span className="text-[11px] text-indigo-600">Sent to {newCrmCompanyForm.email}</span>
+                </div>
+                <div className="flex gap-2">
                   <input
-                    type="email"
-                    required
-                    disabled={orgEmailVerified}
-                    value={newOrgForm.ownerEmail}
-                    onChange={(e) => {
-                      setNewOrgForm({ ...newOrgForm, ownerEmail: e.target.value });
-                      setOrgEmailVerified(false);
-                      setOrgOtpSent(false);
-                      setOrgOtpCode('');
-                    }}
-                    placeholder="john@acme.com"
-                    className={`w-full pl-9 pr-3 py-2 rounded-xl border text-sm font-normal transition-all ${
-                      orgEmailVerified
-                        ? 'bg-emerald-50/60 border-emerald-300 text-slate-900'
-                        : 'bg-slate-50 border-slate-300 text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500'
-                    }`}
+                    type="text"
+                    maxLength={6}
+                    value={crmCompanyOtpCode}
+                    onChange={(e) => setCrmCompanyOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="123456"
+                    className="flex-1 px-3 py-1.5 rounded-lg bg-white border border-indigo-300 text-center text-xs font-black tracking-widest text-slate-900 focus:outline-none focus:border-indigo-600"
                   />
+                  <button
+                    type="button"
+                    onClick={handleVerifyCrmCompanyOtp}
+                    disabled={crmCompanyOtpLoading || crmCompanyOtpCode.length < 6}
+                    className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm disabled:opacity-50 transition-all cursor-pointer"
+                  >
+                    {crmCompanyOtpLoading ? 'Verifying...' : 'Verify OTP'}
+                  </button>
                 </div>
-
-                {!orgEmailVerified ? (
-                  <button
-                    type="button"
-                    onClick={handleSendOrgOtp}
-                    disabled={orgOtpLoading || !(newOrgForm.ownerEmail || newOrgForm.email)}
-                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium shadow-md shadow-blue-500/20 transition-all whitespace-nowrap disabled:opacity-50"
-                  >
-                    {orgOtpLoading ? 'Sending...' : (orgOtpSent ? 'Resend OTP' : 'Send OTP')}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOrgEmailVerified(false);
-                      setOrgOtpSent(false);
-                      setOrgOtpCode('');
-                    }}
-                    className="px-3 py-2 rounded-xl text-xs font-medium text-slate-700 hover:text-slate-900 border border-slate-200 bg-slate-100 hover:bg-slate-200"
-                  >
-                    Change
-                  </button>
-                )}
               </div>
+            )}
+          </div>
 
-              {/* OTP Input for Organization */}
-              {orgOtpSent && !orgEmailVerified && (
-                <div className="mt-2.5 p-3 rounded-xl bg-blue-50/70 border border-blue-200 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-medium text-blue-900">
-                    <span className="flex items-center gap-1.5">
-                      <KeyRound className="w-4 h-4 text-blue-600" />
-                      Enter 6-digit code sent to <span className="underline">{getTargetOrgEmail()}</span>
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      maxLength={6}
-                      value={orgOtpCode}
-                      onChange={(e) => setOrgOtpCode(e.target.value.replace(/\D/g, ''))}
-                      placeholder="Enter 6-digit OTP"
-                      className="flex-1 px-3.5 py-1.5 rounded-lg bg-white border border-blue-300 text-sm font-mono font-semibold tracking-widest text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-400"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleVerifyOrgOtp}
-                      disabled={orgOtpLoading || orgOtpCode.length < 6}
-                      className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition-all shadow-sm disabled:opacity-50"
-                    >
-                      {orgOtpLoading ? 'Verifying...' : 'Verify OTP'}
-                    </button>
-                  </div>
-                </div>
+          {/* Company Admin Login Password */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Set Company Admin Password (For CRM Login) <span className="text-rose-500">*</span>
+            </label>
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                <Lock className="w-3.5 h-3.5" />
+              </div>
+              <input
+                type={showCrmPassword ? 'text' : 'password'}
+                required
+                minLength={6}
+                value={newCrmCompanyForm.password}
+                onChange={(e) => setNewCrmCompanyForm({ ...newCrmCompanyForm, password: e.target.value })}
+                placeholder="Set password (min. 6 characters, e.g. Pass@2026)"
+                className="w-full pl-9 pr-10 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowCrmPassword(!showCrmPassword)}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
+                title={showCrmPassword ? 'Hide password' : 'Show password'}
+              >
+                {showCrmPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
+              <ShieldCheck className="w-3 h-3 text-emerald-600 inline shrink-0" />
+              <span>The company will use this password & contact email to log in and manage their isolated CRM workspace.</span>
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Phone Number (10 Digits)
+              </label>
+              <input
+                type="tel"
+                maxLength={10}
+                value={newCrmCompanyForm.phone}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+                  setNewCrmCompanyForm({ ...newCrmCompanyForm, phone: val });
+                }}
+                placeholder="9876543210"
+                className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600"
+              />
+              {newCrmCompanyForm.phone && newCrmCompanyForm.phone.length !== 10 && (
+                <span className="text-[10px] text-amber-600 font-semibold mt-0.5 block">
+                  Must be exactly 10 digits ({newCrmCompanyForm.phone.length}/10)
+                </span>
               )}
             </div>
           </div>
 
-          {/* Plan Settings */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3 border-t border-slate-200">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Status</label>
-              <select
-                value={newOrgForm.status}
-                onChange={(e) => setNewOrgForm({ ...newOrgForm, status: e.target.value })}
-                className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
-              >
-                <option value="TRIAL">TRIAL (Free Evaluation)</option>
-                <option value="ACTIVE">ACTIVE (Paid)</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Trial Days</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                GSTIN <span className="text-slate-400 font-normal">(Optional)</span>
+              </label>
               <input
-                type="number"
-                value={newOrgForm.trialDays}
-                onChange={(e) => setNewOrgForm({ ...newOrgForm, trialDays: parseInt(e.target.value, 10) || 14 })}
-                className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
+                type="text"
+                maxLength={15}
+                value={newCrmCompanyForm.gstin}
+                onChange={(e) => setNewCrmCompanyForm({ ...newCrmCompanyForm, gstin: e.target.value.toUpperCase() })}
+                placeholder="e.g. 27AAAAA0000A1Z5"
+                className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 font-mono"
               />
             </div>
+
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Initial Plan</label>
-              <select
-                value={newOrgForm.planId}
-                onChange={(e) => setNewOrgForm({ ...newOrgForm, planId: parseInt(e.target.value, 10) })}
-                className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
-              >
-                {plans.length === 0 ? (
-                  <>
-                    <option value={1}>Basic Plan (₹29/mo)</option>
-                    <option value={2}>Pro Plan (Recommended) (₹79/mo)</option>
-                    <option value={3}>Enterprise Plan (₹199/mo)</option>
-                  </>
-                ) : (
-                  plans.map((p) => {
-                    const price = parseFloat(p.price_monthly ?? p.monthly_price ?? 0);
-                    return (
-                      <option key={p.id} value={p.id}>
-                        {p.name} (₹{price.toFixed(0)}/mo) {p.is_popular ? '★ (Recommended)' : ''} {!p.is_active ? '(Inactive)' : ''}
-                      </option>
-                    );
-                  })
-                )}
-              </select>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                PAN <span className="text-slate-400 font-normal">(Optional)</span>
+              </label>
+              <input
+                type="text"
+                maxLength={10}
+                value={newCrmCompanyForm.pan}
+                onChange={(e) => setNewCrmCompanyForm({ ...newCrmCompanyForm, pan: e.target.value.toUpperCase() })}
+                placeholder="e.g. AAAAA0000A"
+                className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 font-mono"
+              />
             </div>
           </div>
 
-          <div className="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-200">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Headquarters Address
+            </label>
+            <input
+              type="text"
+              value={newCrmCompanyForm.address}
+              onChange={(e) => setNewCrmCompanyForm({ ...newCrmCompanyForm, address: e.target.value })}
+              placeholder="e.g. Bandra Kurla Complex, Mumbai, Maharashtra"
+              className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-200">
             <button
               type="button"
-              onClick={() => {
-                setCreateModalOpen(false);
-                setOrgEmailVerified(false);
-                setOrgOtpSent(false);
-                setOrgOtpCode('');
-              }}
-              className="px-4 py-2 rounded-xl border border-slate-300 bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200 transition-colors"
+              onClick={() => setCreateCrmCompanyModalOpen(false)}
+              className="px-4 py-2 rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
-              disabled={actionLoading || !orgEmailVerified}
-              className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium shadow-md shadow-blue-600/20 transition-all disabled:opacity-50 flex items-center gap-2"
+              disabled={crmActionLoading || (newCrmCompanyForm.email && !crmCompanyEmailVerified)}
+              className={`px-5 py-2 rounded-xl text-xs font-semibold shadow-sm transition-all ${
+                !newCrmCompanyForm.email || crmCompanyEmailVerified
+                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer'
+                  : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+              }`}
             >
-              {actionLoading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
-              <span>Create Organization</span>
-              {orgEmailVerified && <CheckCircle2 className="w-4 h-4 text-white" />}
+              {crmActionLoading ? 'Creating Workspace...' : (!newCrmCompanyForm.email || crmCompanyEmailVerified ? 'Provision CRM Company' : 'Verify Email with OTP to Proceed')}
             </button>
           </div>
         </form>
       </Modal>
 
-      {/* SUSPEND MODAL */}
+      {/* SET / RESET CRM PASSWORD MODAL */}
       <Modal
-        isOpen={suspendModalOpen}
+        isOpen={resetPasswordModalOpen}
         onClose={() => {
-          setSuspendModalOpen(false);
-          setSelectedOrg(null);
+          setResetPasswordModalOpen(false);
+          setSelectedCompanyForPassword(null);
+          setNewAdminPassword('');
         }}
-        title={`Suspend Organization: ${selectedOrg?.name || ''}`}
-        subtitle="Suspension will immediately prevent all organization members from accessing CRM services."
+        title="Manage CRM Login Access"
+        subtitle={selectedCompanyForPassword ? `Set or update login password for '${selectedCompanyForPassword.name}' in NexFlow CRM.` : 'Set CRM Password'}
         maxWidth="max-w-md"
       >
-        <div className="space-y-4">
+        <form onSubmit={handleResetPasswordSubmit} className="space-y-4">
+          <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-100 space-y-1.5">
+            <div className="flex items-center justify-between text-xs font-semibold">
+              <span className="text-slate-500">Company:</span>
+              <span className="text-slate-900 font-bold">{selectedCompanyForPassword?.name}</span>
+            </div>
+            <div className="flex items-center justify-between text-xs font-semibold">
+              <span className="text-slate-500">CRM Login Email:</span>
+              <span className="text-indigo-700 font-bold font-mono">{selectedCompanyForPassword?.email || 'No email registered'}</span>
+            </div>
+            <div className="flex items-center justify-between text-xs font-semibold">
+              <span className="text-slate-500">Sold Plan:</span>
+              <span className="text-emerald-700 font-bold">{selectedCompanyForPassword?.plan_name || 'Standard Plan'}</span>
+            </div>
+          </div>
+
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">
-              Reason for Suspension *
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              New Password for NexFlow CRM Login <span className="text-rose-500">*</span>
             </label>
-            <textarea
-              rows={3}
-              value={suspensionReason}
-              onChange={(e) => setSuspensionReason(e.target.value)}
-              placeholder="e.g. Non-payment of subscription invoices past grace period, or terms violation."
-              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-normal text-slate-900 focus:outline-none focus:bg-white focus:border-rose-500"
-            />
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                <Lock className="w-3.5 h-3.5" />
+              </div>
+              <input
+                type={showNewAdminPassword ? 'text' : 'password'}
+                required
+                minLength={6}
+                value={newAdminPassword}
+                onChange={(e) => setNewAdminPassword(e.target.value)}
+                placeholder="Enter new password (min. 6 characters)"
+                className="w-full pl-9 pr-10 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600 font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowNewAdminPassword(!showNewAdminPassword)}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                {showNewAdminPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1.5 flex items-center gap-1">
+              <ShieldCheck className="w-3 h-3 text-emerald-600 inline shrink-0" />
+              <span>This password will be immediately updated and synchronized into NexFlow CRM.</span>
+            </p>
           </div>
 
-          <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium">
-            Customer data will NOT be deleted. You can reactivate this organization at any time from this panel.
-          </div>
-
-          <div className="flex justify-end gap-3 pt-4 border-t border-slate-200">
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-200">
             <button
               type="button"
               onClick={() => {
-                setSuspendModalOpen(false);
-                setSelectedOrg(null);
+                setResetPasswordModalOpen(false);
+                setSelectedCompanyForPassword(null);
+                setNewAdminPassword('');
               }}
-              className="px-4 py-2 rounded-xl border border-slate-300 bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200"
+              className="px-4 py-2 rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold cursor-pointer"
             >
               Cancel
             </button>
             <button
-              type="button"
-              onClick={handleSuspend}
-              disabled={actionLoading || !suspensionReason.trim()}
-              className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-medium shadow-md shadow-rose-600/20 disabled:opacity-50"
+              type="submit"
+              disabled={resetPasswordLoading || !newAdminPassword || newAdminPassword.length < 6}
+              className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition-all disabled:opacity-50 cursor-pointer"
             >
-              Confirm Suspension
+              {resetPasswordLoading ? 'Syncing to CRM...' : 'Update & Sync to CRM'}
             </button>
           </div>
-        </div>
+        </form>
       </Modal>
 
-      {/* CONFIRM DELETE MODAL */}
+      {/* DELETE CRM COMPANY CONFIRM */}
       <ConfirmDialog
-        isOpen={confirmDeleteOpen}
+        isOpen={confirmCrmDeleteOpen}
         onClose={() => {
-          setConfirmDeleteOpen(false);
-          setSelectedOrg(null);
+          setConfirmCrmDeleteOpen(false);
+          setSelectedCrmCompanyToDelete(null);
         }}
-        onConfirm={handleDelete}
-        title="Delete Organization"
-        message={`Are you sure you want to delete '${selectedOrg?.name}'? This will remove the tenant and associated users.`}
-        confirmText="Delete Tenant"
+        onConfirm={handleDeleteCrmCompany}
+        title="Delete CRM Company"
+        message={`Are you sure you want to delete CRM Company '${selectedCrmCompanyToDelete?.name}'? This will remove their workspace and login access.`}
+        confirmText={crmActionLoading ? 'Deleting...' : 'Delete Company'}
         type="danger"
-        isLoading={actionLoading}
       />
     </div>
   );

@@ -22,6 +22,7 @@ const roleRoutes = require('./routes/roleRoutes');
 const permissionRoutes = require('./routes/permissionRoutes');
 const searchRoutes = require('./routes/searchRoutes');
 const analyticsRoutes = require('./routes/analyticsRoutes');
+const crmRoutes = require('./routes/crmRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -64,6 +65,7 @@ app.use('/api/super-admin/settings', settingRoutes);
 app.use('/api/super-admin/support', supportRoutes);
 app.use('/api/super-admin/search', searchRoutes);
 app.use('/api/super-admin/analytics', analyticsRoutes);
+app.use('/api/super-admin/crm', crmRoutes);
 
 // Global Error Handler
 app.use((err, req, res, next) => {

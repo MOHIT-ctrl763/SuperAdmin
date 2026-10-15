@@ -28,6 +28,7 @@ import { AuditLogsPage } from '../pages/audit/AuditLogsPage';
 import { SystemSettingsPage } from '../pages/settings/SystemSettingsPage';
 import { RolesListPage } from '../pages/roles/RolesListPage';
 import { PermissionsListPage } from '../pages/permissions/PermissionsListPage';
+import { CrmIntegrationPage } from '../pages/crm/CrmIntegrationPage';
 
 export function AppRoutes() {
   return (
@@ -72,6 +73,7 @@ export function AppRoutes() {
         <Route path="support" element={<PermissionGuard permission="support.view" pageGuard={true}><SupportTicketsPage /></PermissionGuard>} />
         <Route path="audit-logs" element={<PermissionGuard permission="auditLogs.view" pageGuard={true}><AuditLogsPage /></PermissionGuard>} />
         <Route path="settings" element={<PermissionGuard permission="settings.view" pageGuard={true}><SystemSettingsPage /></PermissionGuard>} />
+        <Route path="crm-integration" element={<PermissionGuard permission="settings.view" pageGuard={true}><CrmIntegrationPage /></PermissionGuard>} />
         
         {/* RBAC Access Control */}
         <Route path="roles" element={<PermissionGuard permission="roles.view" pageGuard={true}><RolesListPage /></PermissionGuard>} />

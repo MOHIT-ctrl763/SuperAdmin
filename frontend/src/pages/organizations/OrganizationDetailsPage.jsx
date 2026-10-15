@@ -22,8 +22,17 @@ import {
   Receipt,
   FileText,
   Zap,
-  ShieldCheck
+  ShieldCheck,
+  Network,
+  Briefcase,
+  MapPin,
+  Phone,
+  RefreshCw,
+  TrendingUp,
+  Sparkles,
+  Link as LinkIcon
 } from 'lucide-react';
+import { crmApi } from '../../services/crmApi';
 
 export function OrganizationDetailsPage() {
   const { id } = useParams();
@@ -40,6 +49,21 @@ export function OrganizationDetailsPage() {
   const [planPaymentMethod, setPlanPaymentMethod] = useState('UPI');
   const [planPaymentStatus, setPlanPaymentStatus] = useState('SUCCESS');
   const [actionLoading, setActionLoading] = useState(false);
+
+  // CRM Workspace State
+  const [crmLoading, setCrmLoading] = useState(false);
+  const [crmData, setCrmData] = useState({
+    leads: [],
+    leadStats: null,
+    quotes: [],
+    quoteStats: null,
+    branches: [],
+    users: []
+  });
+  const [crmActiveTab, setCrmActiveTab] = useState('LEADS'); // 'LEADS' | 'QUOTES' | 'STAFF' | 'BRANCHES'
+  const [linkCrmModalOpen, setLinkCrmModalOpen] = useState(false);
+  const [crmCompaniesList, setCrmCompaniesList] = useState([]);
+  const [selectedCrmCoId, setSelectedCrmCoId] = useState('');
 
   const toast = useToast();
 
@@ -70,6 +94,65 @@ export function OrganizationDetailsPage() {
     fetchDetails();
     fetchPlans();
   }, [id]);
+
+  const fetchCrmWorkspace = async (companyId) => {
+    setCrmLoading(true);
+    try {
+      const [leadsRes, leadStatsRes, quotesRes, quoteStatsRes, branchesRes, usersRes] = await Promise.all([
+        crmApi.getLeads({ limit: 10 }).catch(() => ({ success: false })),
+        crmApi.getLeadStats().catch(() => ({ success: false })),
+        crmApi.getQuotations({ limit: 10 }).catch(() => ({ success: false })),
+        crmApi.getQuotationStats().catch(() => ({ success: false })),
+        crmApi.getBranches().catch(() => ({ success: false })),
+        crmApi.getUsers().catch(() => ({ success: false }))
+      ]);
+
+      setCrmData({
+        leads: leadsRes?.success && leadsRes?.data ? (Array.isArray(leadsRes.data) ? leadsRes.data : (leadsRes.data.items || [])) : [],
+        leadStats: leadStatsRes?.success ? leadStatsRes.data : null,
+        quotes: quotesRes?.success && quotesRes?.data ? (Array.isArray(quotesRes.data) ? quotesRes.data : (quotesRes.data.items || [])) : [],
+        quoteStats: quoteStatsRes?.success ? quoteStatsRes.data : null,
+        branches: branchesRes?.success && branchesRes?.data ? (Array.isArray(branchesRes.data) ? branchesRes.data : (branchesRes.data.items || [])) : [],
+        users: usersRes?.success && usersRes?.data ? (Array.isArray(usersRes.data) ? usersRes.data : (usersRes.data.items || [])) : []
+      });
+    } catch (err) {
+      console.error('Failed to load CRM workspace data', err);
+    } finally {
+      setCrmLoading(false);
+    }
+  };
+
+  const handleOpenLinkModal = async () => {
+    try {
+      const res = await crmApi.getCompanies();
+      if (res?.success && res?.data) {
+        const list = Array.isArray(res.data) ? res.data : (res.data.items || []);
+        setCrmCompaniesList(list);
+      }
+    } catch (e) {}
+    setSelectedCrmCoId(data?.organization?.crm_company_id || '');
+    setLinkCrmModalOpen(true);
+  };
+
+  const handleSaveLink = async (e) => {
+    e.preventDefault();
+    if (!selectedCrmCoId) return;
+    setActionLoading(true);
+    try {
+      const res = await crmApi.syncOrganization(data?.organization?.id, selectedCrmCoId);
+      if (res.success) {
+        toast.success(`Organization linked to CRM Company.`);
+        setLinkCrmModalOpen(false);
+        fetchDetails();
+      } else {
+        toast.error(res.message || 'Failed to sync with CRM');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Error syncing with CRM');
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   const org = data?.organization;
   const sub = data?.subscription;
@@ -124,7 +207,8 @@ export function OrganizationDetailsPage() {
       const res = await api.post('/auth/impersonate', { organizationId: org.id });
       if (res.success && res.data?.token) {
         toast.success(`Impersonation active for ${org.name}`);
-        const crmUrl = `http://localhost:5173/dashboard?impersonate_token=${res.data.token}`;
+        const crmBase = import.meta.env.VITE_CRM_FRONTEND_URL || 'http://localhost:5173';
+        const crmUrl = `${crmBase}/dashboard?impersonate_token=${res.data.token}`;
         window.open(crmUrl, '_blank');
       }
     } catch (err) {
@@ -237,7 +321,29 @@ export function OrganizationDetailsPage() {
             </h1>
             <Badge variant={org.status}>{org.status}</Badge>
           </div>
-          <p className="text-xs font-normal text-slate-500 mt-1">Tenant ID: #{org.id} • Slug: {org.slug}</p>
+          <div className="flex items-center gap-2 mt-1">
+            <p className="text-xs font-normal text-slate-500">Tenant ID: #{org.id} • Slug: {org.slug}</p>
+            {org.crm_company_id ? (
+              <div className="flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-mono font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                  <Network className="w-3 h-3 text-indigo-600" /> CRM Linked: {org.crm_company_id.substring(0, 8)}...
+                </span>
+                <button
+                  onClick={handleOpenLinkModal}
+                  className="text-[11px] font-semibold text-slate-500 hover:text-indigo-600 underline"
+                >
+                  Change
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleOpenLinkModal}
+                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 border border-slate-200 transition-all"
+              >
+                <LinkIcon className="w-3 h-3 text-slate-400" /> Link CRM Company
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Action Controls */}
@@ -576,6 +682,305 @@ export function OrganizationDetailsPage() {
           </div>
         </div>
       )}
+
+      {/* Live NexFlow CRM Tenant Operations Workspace */}
+      <div className="rounded-2xl bg-white border border-slate-200/90 p-6 shadow-sm space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shadow-sm">
+              <Network className="w-5 h-5 stroke-[2]" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-semibold text-slate-900 tracking-tight">
+                  Live NexFlow CRM Tenant Workspace
+                </h3>
+                {org.crm_company_id ? (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    Live Synced
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                    Not Linked
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 font-normal mt-0.5">
+                Real-time operational bridge to NexFlow CRM: inspect leads pipeline, customer quotes, branch infrastructure, and staff users.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {org.crm_company_id ? (
+              <>
+                <button
+                  onClick={() => fetchCrmWorkspace(org.crm_company_id)}
+                  disabled={crmLoading}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-300 transition-all shadow-xs"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${crmLoading ? 'animate-spin text-indigo-600' : 'text-slate-500'}`} />
+                  <span>Sync CRM</span>
+                </button>
+                <button
+                  onClick={handleOpenLinkModal}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-all shadow-xs"
+                >
+                  <LinkIcon className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Re-link Workspace</span>
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={handleOpenLinkModal}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition-all"
+              >
+                <LinkIcon className="w-4 h-4" />
+                <span>Connect to CRM Workspace</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {org.crm_company_id ? (
+          <>
+            {/* 4 CRM KPI Metric Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-slate-50/70 border border-slate-200/80">
+                <div className="flex items-center justify-between text-slate-500 mb-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider">CRM Total Leads</span>
+                  <Users className="w-4 h-4 text-indigo-600" />
+                </div>
+                <div className="text-xl font-semibold text-slate-900">
+                  {crmData.leadStats?.total_leads || crmData.leads.length || 0}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  Live leads active in tenant CRM
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50/70 border border-slate-200/80">
+                <div className="flex items-center justify-between text-slate-500 mb-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider">Quotations Pipeline</span>
+                  <Receipt className="w-4 h-4 text-emerald-600" />
+                </div>
+                <div className="text-xl font-semibold text-slate-900">
+                  ₹{Number(crmData.quoteStats?.total_quotation_value || crmData.quotes.reduce((acc, q) => acc + (Number(q.total_amount) || 0), 0)).toLocaleString('en-IN')}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  {crmData.quotes.length} total quotations issued
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50/70 border border-slate-200/80">
+                <div className="flex items-center justify-between text-slate-500 mb-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider">Operating Branches</span>
+                  <MapPin className="w-4 h-4 text-purple-600" />
+                </div>
+                <div className="text-xl font-semibold text-slate-900">
+                  {crmData.branches.length} Hubs
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  Assigned geographical offices
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50/70 border border-slate-200/80">
+                <div className="flex items-center justify-between text-slate-500 mb-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider">Assigned Staff</span>
+                  <Briefcase className="w-4 h-4 text-blue-600" />
+                </div>
+                <div className="text-xl font-semibold text-slate-900">
+                  {crmData.users.length} Users
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  Live tenant sales & operations staff
+                </div>
+              </div>
+            </div>
+
+            {/* Sub-tab Navigation */}
+            <div className="flex border-b border-slate-200 gap-4 pt-1">
+              {[
+                { id: 'LEADS', label: `Active Leads (${crmData.leads.length})` },
+                { id: 'QUOTES', label: `Quotations (${crmData.quotes.length})` },
+                { id: 'STAFF', label: `Staff Members (${crmData.users.length})` },
+                { id: 'BRANCHES', label: `Branches (${crmData.branches.length})` }
+              ].map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setCrmActiveTab(t.id)}
+                  className={`pb-2.5 text-xs font-semibold border-b-2 transition-all ${
+                    crmActiveTab === t.id
+                      ? 'border-indigo-600 text-indigo-600'
+                      : 'border-transparent text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Subtab Contents */}
+            {crmActiveTab === 'LEADS' && (
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold uppercase tracking-wider">
+                      <th className="py-2.5 px-3">Lead Name</th>
+                      <th className="py-2.5 px-3">Contact</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3">Pipeline Value</th>
+                      <th className="py-2.5 px-3">Source</th>
+                      <th className="py-2.5 px-3">Created</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
+                    {crmData.leads.map((ld) => (
+                      <tr key={ld.id} className="hover:bg-slate-50/70 transition-colors">
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{ld.name || ld.contact_name || `Lead #${ld.id}`}</td>
+                        <td className="py-2.5 px-3 text-slate-500">{ld.email || ld.phone || '—'}</td>
+                        <td className="py-2.5 px-3">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                            {ld.status || ld.stage || 'NEW'}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">
+                          {ld.deal_value || ld.value ? `₹${Number(ld.deal_value || ld.value).toLocaleString('en-IN')}` : '—'}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-500">{ld.source || 'Website'}</td>
+                        <td className="py-2.5 px-3 text-slate-500">
+                          {ld.created_at ? new Date(ld.created_at).toLocaleDateString() : 'N/A'}
+                        </td>
+                      </tr>
+                    ))}
+                    {crmData.leads.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="py-6 text-center text-slate-400 font-normal">
+                          No active CRM leads found for this company.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {crmActiveTab === 'QUOTES' && (
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold uppercase tracking-wider">
+                      <th className="py-2.5 px-3">Quote #</th>
+                      <th className="py-2.5 px-3">Customer</th>
+                      <th className="py-2.5 px-3">Total Amount</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3">Expiry Date</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
+                    {crmData.quotes.map((q) => (
+                      <tr key={q.id} className="hover:bg-slate-50/70 transition-colors">
+                        <td className="py-2.5 px-3 font-mono font-semibold text-indigo-600">{q.quotation_number || `QUO-${q.id}`}</td>
+                        <td className="py-2.5 px-3 text-slate-800 font-medium">{q.lead_name || q.client_name || 'Client'}</td>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">₹{Number(q.total_amount || q.grand_total || 0).toLocaleString('en-IN')}</td>
+                        <td className="py-2.5 px-3">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            {q.status || 'DRAFT'}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-500">
+                          {q.valid_until ? new Date(q.valid_until).toLocaleDateString() : '30 days'}
+                        </td>
+                      </tr>
+                    ))}
+                    {crmData.quotes.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="py-6 text-center text-slate-400 font-normal">
+                          No customer quotations recorded.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {crmActiveTab === 'STAFF' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {crmData.users.map((u) => (
+                  <div key={u.id} className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-xs">
+                      {u.name ? u.name.charAt(0).toUpperCase() : 'U'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h5 className="font-semibold text-slate-900 text-xs truncate">{u.name}</h5>
+                      <p className="text-[11px] text-slate-500 truncate">{u.email}</p>
+                      <span className="inline-block mt-0.5 px-1.5 py-0.2 rounded text-[10px] font-semibold bg-indigo-50 text-indigo-700">
+                        {u.role_title || u.designation || u.role || 'Staff'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                {crmData.users.length === 0 && (
+                  <div className="col-span-3 py-6 text-center text-slate-400 text-xs">
+                    No CRM staff registered for this company.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {crmActiveTab === 'BRANCHES' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {crmData.branches.map((b) => (
+                  <div key={b.id} className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <h5 className="font-semibold text-slate-900 text-xs">{b.name}</h5>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        Active Hub
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 flex items-center gap-1">
+                      <MapPin className="w-3 h-3 text-slate-400" />
+                      <span>{b.city || b.address || 'Corporate Location'}</span>
+                    </p>
+                    {b.phone && (
+                      <p className="text-[11px] text-slate-500 flex items-center gap-1">
+                        <Phone className="w-3 h-3 text-slate-400" />
+                        <span>{b.phone}</span>
+                      </p>
+                    )}
+                  </div>
+                ))}
+                {crmData.branches.length === 0 && (
+                  <div className="col-span-3 py-6 text-center text-slate-400 text-xs">
+                    No branches configured.
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="p-6 rounded-xl bg-slate-50 border border-slate-200 text-center space-y-3">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 mx-auto">
+              <Network className="w-6 h-6 stroke-[2]" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-slate-900">No CRM Workspace Connected</h4>
+              <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
+                Link this SaaS tenant to an existing NexFlow CRM workspace to unlock synchronized leads, customer quotations, branch networks, and CRM agent management.
+              </p>
+            </div>
+            <button
+              onClick={handleOpenLinkModal}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition-all"
+            >
+              <LinkIcon className="w-4 h-4" />
+              <span>Connect NexFlow CRM Workspace</span>
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Active Organization Plan Details & Specifications */}
       <div className="rounded-2xl bg-white border border-slate-200/90 p-6 shadow-sm space-y-6">
@@ -935,6 +1340,57 @@ export function OrganizationDetailsPage() {
               className="px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-medium shadow-md shadow-sky-500/20 disabled:opacity-50"
             >
               Extend Trial
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* LINK CRM MODAL */}
+      <Modal
+        isOpen={linkCrmModalOpen}
+        onClose={() => setLinkCrmModalOpen(false)}
+        title="Connect NexFlow CRM Workspace"
+        subtitle={`Select a CRM company to bridge with '${org.name}'.`}
+        maxWidth="max-w-md"
+      >
+        <form onSubmit={handleSaveLink} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+              NexFlow CRM Company <span className="text-rose-500">*</span>
+            </label>
+            <select
+              required
+              value={selectedCrmCoId}
+              onChange={(e) => setSelectedCrmCoId(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-600"
+            >
+              <option value="">-- Choose CRM Company --</option>
+              {crmCompaniesList.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} {c.email ? `(${c.email})` : ''} - ID: {c.id.substring(0, 8)}...
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl text-xs text-indigo-900">
+            This will immediately synchronize live CRM operations, quotes, and leads for {org.name} directly inside this page.
+          </div>
+
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={() => setLinkCrmModalOpen(false)}
+              className="px-4 py-2 rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={actionLoading || !selectedCrmCoId}
+              className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition-all disabled:opacity-50"
+            >
+              {actionLoading ? 'Connecting...' : 'Save CRM Link'}
             </button>
           </div>
         </form>

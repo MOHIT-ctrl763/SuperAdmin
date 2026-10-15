@@ -15,7 +15,15 @@ exports.getUsers = async (req, res) => {
     const params = [];
     let pIdx = 1;
 
-    if (organizationId !== 'ALL') {
+    if (!req.user?.isSuperAdmin) {
+      const orgId = req.user?.organization_id || 0;
+      const compId = req.user?.crm_company_id || '0';
+      const myId = req.user?.id || 0;
+      sql += ` AND (organization_id = $${pIdx} OR crm_company_id = $${pIdx + 1} OR id = $${pIdx + 2})`;
+      countSql += ` AND (organization_id = $${pIdx} OR crm_company_id = $${pIdx + 1} OR id = $${pIdx + 2})`;
+      params.push(orgId, compId, myId);
+      pIdx += 3;
+    } else if (organizationId !== 'ALL') {
       if (organizationId === 'PLATFORM') {
         sql += ' AND organization_id IS NULL';
         countSql += ' AND organization_id IS NULL';
@@ -130,6 +138,12 @@ exports.createUser = async (req, res) => {
     else roleDisplay = assignedRole;
 
     const hash = bcrypt.hashSync(password, 10);
+    if (phone) {
+      const numericPhone = String(phone).replace(/\D/g, '');
+      if (numericPhone.length !== 10) {
+        return res.status(400).json({ success: false, message: 'Phone number must be exactly 10 digits without letters or special characters.' });
+      }
+    }
     const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(0, 10) : '';
 
     const result = await query(`
@@ -188,6 +202,12 @@ exports.updateUser = async (req, res) => {
     else if (assignedRole === 'ORG_MEMBER') roleDisplay = 'Organization Member';
     else roleDisplay = assignedRole;
 
+    if (phone) {
+      const numericPhone = String(phone).replace(/\D/g, '');
+      if (numericPhone.length !== 10) {
+        return res.status(400).json({ success: false, message: 'Phone number must be exactly 10 digits without letters or special characters.' });
+      }
+    }
     const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(0, 10) : '';
 
     await query(`
